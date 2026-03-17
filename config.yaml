@@ -1,0 +1,27 @@
+#config.yaml
+app:
+  sandbox_root: "/home/sundasheng/p4_agent_sandbox"
+  log_dir: "/home/sundasheng/p4_agent_sandbox/logs"
+  db_path: "/home/sundasheng/p4_agent_sandbox/db/app.db"
+
+policy:
+  allow_tools:
+    - file_list
+    - file_read
+    - file_write
+    - echo
+    - files_list
+    - file_meta
+    - file_read_by_id
+    - file_parse_by_id
+    - file_summary_by_id
+    - knowledge_build_index
+    - knowledge_search
+    - knowledge_build_chunks
+    - knowledge_build_embeddings
+    - knowledge_semantic_search
+    - knowledge_rag_answer
+
+server:
+  host: "127.0.0.1"
+  port: 8000

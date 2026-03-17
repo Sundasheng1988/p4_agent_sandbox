@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.log
+
+# Virtual env
+.venv/
+
+# Runtime data (VERY IMPORTANT)
+uploads/
+artifacts/
+logs/
+db/
+
+# Temp
+tmp_test/
+
+# OS
+.DS_Store
+Thumbs.db
