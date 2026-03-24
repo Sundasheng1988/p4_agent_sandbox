@@ -21,6 +21,7 @@ policy:
     - knowledge_build_embeddings
     - knowledge_semantic_search
     - knowledge_rag_answer
+    - knowledge_reset
 
 server:
   host: "127.0.0.1"

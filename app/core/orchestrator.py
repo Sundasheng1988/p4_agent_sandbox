@@ -120,6 +120,28 @@ class Orchestrator:
             return plan
         
         # =============================
+        # 6.5) 重置知识库运行数据
+        # =============================
+        if (
+            "重置知识库" in t
+            or "清空知识库" in t
+            or "重建前清空知识库" in t
+            or "reset knowledge" in t.lower()
+        ):
+            plan.append(
+                ToolCall(
+                    name="knowledge_reset",
+                    args={
+                        "reset_db": True,
+                        "reset_artifacts": True,
+                        "reset_logs": False,
+                        "reset_uploads": False,
+                    },
+                )
+            )
+            return plan
+        
+        # =============================
         # 7) 构建知识索引
         # =============================
         if "构建知识索引" in t or "生成知识库" in t:
