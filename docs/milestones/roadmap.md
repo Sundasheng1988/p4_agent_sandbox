@@ -28,9 +28,38 @@
 - Context Assembly
 - LLM Reasoning
 - Answer Generation
+- Source Attribution
+- Debug / User Mode
 
 ## M4 Agent Intelligence
-- Planning
+- LLM Planner
 - Multi-step Tool Use
-- Memory
 - Reflection / Verification
+- Rule-based Planner Fallback
+
+## M5 Agent Memory
+- Session Memory
+- Persistent Memory
+- User Preferences
+- Task History Reuse
+
+## M6 Online Search & Live Knowledge
+- Trusted Web Search
+- News Retrieval
+- Source Scoring
+- Source Filtering
+- Live Knowledge Summarization
+
+## M7 Agent UI Workspace
+- Agent Chat UI
+- Task / Plan Display
+- Tool Call Trace
+- Source Panel
+- Knowledge Base Panel
+- Debug / User View Switch
+
+## M8 Domain Agents
+- News Agent
+- Research Agent
+- Knowledge Agent
+- Personal Workflow Agent

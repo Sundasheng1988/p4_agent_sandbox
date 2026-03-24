@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from app.core.chunking import build_chunks_for_text
 from app.tools.spec import ToolSpec
 
 
@@ -16,42 +17,6 @@ def _load_json(path: Path) -> Dict[str, Any]:
 def _write_json(path: Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _chunk_text(text: str, chunk_size: int, overlap: int) -> List[Dict[str, Any]]:
-    text = text or ""
-    if not text.strip():
-        return []
-
-    chunks: List[Dict[str, Any]] = []
-    step = max(1, chunk_size - overlap)
-
-    i = 0
-    idx = 1
-    n = len(text)
-
-    while i < n:
-        start = i
-        end = min(i + chunk_size, n)
-        piece = text[start:end]
-
-        chunks.append(
-            {
-                "chunk_index": idx,
-                "start": start,
-                "end": end,
-                "text": piece,
-            }
-        )
-
-        if end >= n:
-            break
-
-        i += step
-        idx += 1
-
-    return chunks
-
 
 async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
     args = args or {}
@@ -125,20 +90,13 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         )
         text = parsed.get("text", "") or ""
 
-        raw_chunks = _chunk_text(text, chunk_size=chunk_size, overlap=overlap)
-
-        chunks = []
-        for c in raw_chunks:
-            chunk_id = f"{file_id}_{c['chunk_index']:04d}"
-            chunks.append(
-                {
-                    "chunk_id": chunk_id,
-                    "chunk_index": c["chunk_index"],
-                    "start": c["start"],
-                    "end": c["end"],
-                    "text": c["text"],
-                }
-            )
+        chunks = build_chunks_for_text(
+            file_id=file_id,
+            filename=filename,
+            text=text,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
 
         record = {
             "file_id": file_id,
@@ -168,7 +126,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     index = {
-        "version": "m2.5.1",
+        "version": "m2.5.1-v2",
         "updated_at": time.time(),
         "chunk_size": chunk_size,
         "overlap": overlap,

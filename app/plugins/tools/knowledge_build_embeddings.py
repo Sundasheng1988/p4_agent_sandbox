@@ -125,10 +125,15 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
 
         for ch in chunks:
             text = ch.get("text", "") or ""
+            embedding_text = ch.get("embedding_text") or text
             chunk_id = ch.get("chunk_id")
             chunk_index_num = int(ch.get("chunk_index", 0))
             start = int(ch.get("start", 0))
             end = int(ch.get("end", 0))
+
+            section_title = ch.get("section_title", "") or ""
+            heading_level = int(ch.get("heading_level", 0) or 0)
+            section_path = ch.get("section_path", []) or []
 
             if not chunk_id:
                 continue
@@ -140,7 +145,10 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
                     "chunk_index": chunk_index_num,
                     "start": start,
                     "end": end,
-                    "text_preview": _preview(text),
+                    "text_preview": _preview(text),  # 预览仍然给用户看正文，不用 embedding_text
+                    "section_title": section_title,
+                    "heading_level": heading_level,
+                    "section_path": section_path,
                 }
             )
 
@@ -201,6 +209,9 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
                     "start": row["start"],
                     "end": row["end"],
                     "text_preview": row["text_preview"],
+                    "section_title": row.get("section_title", ""),
+                    "heading_level": row.get("heading_level", 0),
+                    "section_path": row.get("section_path", []),
                 }
             )
 
@@ -232,7 +243,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     vector_index = {
-        "version": "m2.5.2",
+        "version": "m2.5.2-v2",
         "updated_at": time.time(),
         "model_name": model_name,
         "normalize": normalize,
