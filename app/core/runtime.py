@@ -53,6 +53,7 @@ _policy = Policy(allow_tools=_cfg.policy.allow_tools)
 print("[BOOT] runtime.py =", __file__)
 print("[BOOT] policy.allow_tools =", _cfg.policy.allow_tools)
 print("[BOOT] check file_list =", _policy.check_tool("file_list", {"path": _cfg.app.sandbox_root}))
+print("[BOOT] planner =", _cfg.planner)
 
 _ctx = RuntimeCtx(
     sandbox_root=_cfg.app.sandbox_root,

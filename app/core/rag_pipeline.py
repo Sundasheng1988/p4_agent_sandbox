@@ -9,6 +9,8 @@ import numpy as np
 
 from app.core.embeddings import embed_query, cosine_score
 from app.core.llm_client import generate_with_ollama
+from app.core.hybrid_retrieval import hybrid_retrieve
+from app.core.context_builder import build_context
 
 
 SYSTEM_PROMPT = """你是一个知识库问答助手。
@@ -31,10 +33,6 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 
 def _load_chunk_record(sandbox: Path, file_id: str) -> Dict[str, Any]:
-    """
-    读取单个文件的 chunks 记录
-    artifacts/chunks/<file_id>.chunks.json
-    """
     chunk_path = sandbox / "artifacts" / "chunks" / f"{file_id}.chunks.json"
     if not chunk_path.exists():
         return {}
@@ -42,9 +40,6 @@ def _load_chunk_record(sandbox: Path, file_id: str) -> Dict[str, Any]:
 
 
 def _get_full_chunk_text(sandbox: Path, file_id: str, chunk_id: str) -> str:
-    """
-    根据 file_id + chunk_id 从 chunks.json 中取完整 chunk 文本
-    """
     rec = _load_chunk_record(sandbox, file_id=file_id)
     chunks = rec.get("chunks", []) or []
 
@@ -55,49 +50,65 @@ def _get_full_chunk_text(sandbox: Path, file_id: str, chunk_id: str) -> str:
     return ""
 
 
-def build_context_from_hits(hits: List[Dict[str, Any]], max_chars: int = 4000) -> str:
-    """
-    使用完整 chunk 文本构造上下文，而不是 snippet。
-    """
-    parts: List[str] = []
-    total = 0
+def _normalize_extra_context(extra_context: Any) -> str:
+    if extra_context is None:
+        return ""
 
-    for i, hit in enumerate(hits, start=1):
-        text = (hit.get("full_text") or hit.get("snippet") or "").strip()
-        if not text:
-            continue
+    if isinstance(extra_context, str):
+        return extra_context.strip()
 
-        filename = hit.get("filename", "")
-        chunk_id = hit.get("chunk_id", "")
-        score = hit.get("score", 0)
+    if isinstance(extra_context, (list, dict)):
+        try:
+            return json.dumps(extra_context, ensure_ascii=False, indent=2).strip()
+        except Exception:
+            return str(extra_context).strip()
 
-        block = (
-            f"[{i}] "
-            f"file={filename} "
-            f"chunk={chunk_id} "
-            f"score={score}\n"
-            f"{text}"
-        )
+    return str(extra_context).strip()
 
-        if total + len(block) > max_chars:
-            break
 
-        parts.append(block)
-        total += len(block) + 2
+def _load_file_meta(sandbox_root: Path, file_id: str) -> Dict[str, Any]:
+    meta_path = sandbox_root / "uploads" / file_id / "meta.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return _load_json(meta_path)
+    except Exception:
+        return {}
 
-    return "\n\n".join(parts)
+
+def _match_filters(
+    *,
+    file_meta: Dict[str, Any],
+    domain: str | None,
+    file_type: str | None,
+    source: str | None,
+) -> bool:
+    if domain and file_meta.get("domain") != domain:
+        return False
+    if file_type and file_meta.get("file_type") != file_type:
+        return False
+    if source and file_meta.get("source") != source:
+        return False
+    return True
 
 
 def semantic_retrieve(
     sandbox_root: str,
     question: str,
-    top_k: int = 5,
+    top_k: int = 10,
+    domain: str | None = None,
+    file_type: str | None = None,
+    source: str | None = None,
 ) -> Dict[str, Any]:
     sandbox = Path(sandbox_root)
     vector_index_path = sandbox / "artifacts" / "vector_index.json"
 
     if not vector_index_path.exists():
-        return {"ok": False, "hits": [], "reason": "vector_index.json not found"}
+        return {
+            "ok": False,
+            "hits": [],
+            "reason": "vector_index.json not found",
+        }
 
     vector_index = _load_json(vector_index_path)
     model_name = str(vector_index.get("model_name", "all-MiniLM-L6-v2")).strip()
@@ -111,6 +122,7 @@ def semantic_retrieve(
     )
 
     hits: List[Tuple[float, Dict[str, Any]]] = []
+    filtered_file_count = 0
 
     for item in items:
         file_id = item.get("file_id", "")
@@ -118,6 +130,30 @@ def semantic_retrieve(
         manifest_rel = item.get("record_path")
         if not manifest_rel:
             continue
+
+        file_meta = {
+            "domain": item.get("domain"),
+            "file_type": item.get("file_type"),
+            "source": item.get("source"),
+        }
+
+        if not any(file_meta.values()):
+            full_meta = _load_file_meta(sandbox_root=sandbox, file_id=file_id)
+            file_meta = {
+                "domain": full_meta.get("domain"),
+                "file_type": full_meta.get("file_type"),
+                "source": full_meta.get("source"),
+            }
+
+        if not _match_filters(
+            file_meta=file_meta,
+            domain=domain,
+            file_type=file_type,
+            source=source,
+        ):
+            continue
+
+        filtered_file_count += 1
 
         manifest_path = sandbox / manifest_rel
         if not manifest_path.exists():
@@ -156,6 +192,9 @@ def semantic_retrieve(
                 "start": row.get("start"),
                 "end": row.get("end"),
                 "search_mode": "semantic",
+                "domain": file_meta.get("domain"),
+                "file_type": file_meta.get("file_type"),
+                "source": file_meta.get("source"),
             }
             hits.append((score, hit))
 
@@ -165,8 +204,12 @@ def semantic_retrieve(
     return {
         "ok": True,
         "query": question,
+        "domain": domain,
+        "file_type": file_type,
+        "source": source,
         "hits": top_hits,
         "hits_total": len(hits),
+        "filtered_file_count": filtered_file_count,
         "model_name": model_name,
     }
 
@@ -185,33 +228,59 @@ def build_rag_prompt(question: str, context: str) -> str:
 
 
 async def run_rag_pipeline(
+    ctx,
     sandbox_root: str,
     question: str,
     model_name: str,
-    top_k: int = 5,
+    top_k: int = 10,
     max_context_chars: int = 4000,
+    extra_context: Any = None,
+    domain: str | None = None,
+    file_type: str | None = None,
+    source: str | None = None,
 ) -> Dict[str, Any]:
-    semantic_out = semantic_retrieve(
-        sandbox_root=sandbox_root,
-        question=question,
-        top_k=top_k,
+    retrieval_out = await hybrid_retrieve(
+        ctx,
+        query=question,
+        limit=top_k,
+        domain=domain,
+        file_type=file_type,
+        source=source,
     )
 
-    if not semantic_out.get("ok", False):
+    if not retrieval_out.get("ok", False):
         return {
             "question": question,
+            "domain": domain,
+            "file_type": file_type,
+            "source": source,
             "hits": [],
             "context": "",
             "prompt": "",
             "answer": "",
             "llm_model": model_name,
             "done": False,
-            "error": semantic_out.get("reason", "semantic retrieval failed"),
+            "error": retrieval_out.get("reason", "hybrid retrieval failed"),
         }
 
-    hits = semantic_out.get("hits", []) or []
-    context = build_context_from_hits(hits=hits, max_chars=max_context_chars)
-    prompt = build_rag_prompt(question=question, context=context)
+    hits = retrieval_out.get("hits", []) or []
+    context = build_context(
+        hits=hits,
+        max_chars=max_context_chars,
+        query=question,
+    )
+
+    extra_context_text = _normalize_extra_context(extra_context)
+    final_context = context
+
+    if extra_context_text:
+        final_context = (
+            f"{context}\n\n"
+            f"[Planner Extra Context]\n"
+            f"{extra_context_text}"
+        ).strip()
+
+    prompt = build_rag_prompt(question=question, context=final_context)
 
     llm_out = generate_with_ollama(
         prompt=prompt,
@@ -223,8 +292,11 @@ async def run_rag_pipeline(
 
     return {
         "question": question,
+        "domain": domain,
+        "file_type": file_type,
+        "source": source,
         "hits": hits,
-        "context": context,
+        "context": final_context,
         "prompt": prompt,
         "answer": answer,
         "llm_model": llm_out.get("model", model_name),

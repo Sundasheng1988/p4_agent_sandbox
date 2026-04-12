@@ -25,7 +25,12 @@ class ToolRegistry:
         self._handlers[spec.name] = spec.handler
 
     def get(self, name: str) -> Callable[..., Any]:
-        return self._handlers[name]
+        print("[DEBUG ToolRegistry.get] asked =", name)
+        print("[DEBUG ToolRegistry.get] keys =", sorted(self._handlers.keys()))
+        fn = self._handlers.get(name)
+        if fn is None:
+            raise ValueError(f"tool handler not found: {name}")
+        return fn
 
     def has(self, name: str) -> bool:
         return name in self._handlers
@@ -101,7 +106,9 @@ class SafeToolExecutor:
         except Exception as e:
             self.audit.write(trace_id, "tool_args_invalid", {"tool": name, "args": args, "error": str(e)})
             raise
-
+        
+        print("[DEBUG SafeToolExecutor.call] registry_id =", id(self.registry))
+        print("[DEBUG SafeToolExecutor.call] has_tool =", self.registry.has(name))
         fn = self.registry.get(name)
         self.audit.write(trace_id, "tool_call", {"tool": name, "args": args})
 

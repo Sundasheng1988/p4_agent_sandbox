@@ -1,11 +1,12 @@
+# knowledge_semantic_search
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
-import re
 
 from app.core.embeddings import embed_query, cosine_score
 from app.tools.spec import ToolSpec
@@ -21,14 +22,12 @@ def _snippet_from_preview(text_preview: str, max_len: int = 160) -> str:
         return s
     return s[:max_len].rstrip() + "..."
 
+
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", "", (text or "").strip().lower())
 
 
 def _extract_terms(query: str) -> List[str]:
-    """
-    非严格中文分词，只做轻量关键词提取
-    """
     q = (query or "").strip()
 
     weak_words = ["如何", "怎么", "怎样", "请问", "一下"]
@@ -46,7 +45,6 @@ def _extract_terms(query: str) -> List[str]:
         if len(part.strip()) >= 2 and part.strip() not in terms:
             terms.append(part.strip())
 
-    # 可选：补一些常见短语候选
     candidates = [
         "重建知识库",
         "清空知识库",
@@ -85,7 +83,6 @@ def _compute_rerank_bonus(
 
     terms = _extract_terms(query)
 
-    # 1. 标题完整命中
     if q_norm and title_norm:
         if q_norm == title_norm:
             bonus += 0.16
@@ -94,7 +91,6 @@ def _compute_rerank_bonus(
         elif title_norm in q_norm and len(title_norm) >= 4:
             bonus += 0.08
 
-    # 2. query关键词命中标题
     title_hits = 0
     for t in terms:
         t_norm = _normalize_text(t)
@@ -102,7 +98,6 @@ def _compute_rerank_bonus(
             title_hits += 1
     bonus += min(title_hits * 0.03, 0.12)
 
-    # 3. query关键词命中 snippet
     snippet_hits = 0
     for t in terms:
         t_norm = _normalize_text(t)
@@ -110,16 +105,13 @@ def _compute_rerank_bonus(
             snippet_hits += 1
     bonus += min(snippet_hits * 0.01, 0.04)
 
-    # 4. playbook类文件轻微加分
     if (filename or "").lower() in {"ops_playbook.md", "playbook.md", "faq.md", "runbook.md"}:
         bonus += 0.01
 
-    # 5. 纯一级标题空块降权
     if heading_level == 1:
         if title_norm and snippet_norm and title_norm == snippet_norm and len(snippet_norm) <= 40:
             bonus -= 0.15
 
-    # 6. 泛概念标题轻微降权（不只针对 h1）
     generic_titles = {
         "chunk",
         "runtime",
@@ -132,16 +124,52 @@ def _compute_rerank_bonus(
     }
     if title_norm in generic_titles:
         bonus -= 0.03
-    # 🔥 最终收敛（防止过强）
-    bonus = min(bonus, 0.28)
 
+    bonus = min(bonus, 0.28)
     return bonus
+
+
+def _load_file_meta(sandbox_root: Path, file_id: str) -> Dict[str, Any]:
+    meta_path = sandbox_root / "uploads" / file_id / "meta.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return _load_json(meta_path)
+    except Exception:
+        return {}
+
+
+def _match_filters(
+    *,
+    file_meta: Dict[str, Any],
+    domain: str | None,
+    file_type: str | None,
+    source: str | None,
+) -> bool:
+    if domain and file_meta.get("domain") != domain:
+        return False
+    if file_type and file_meta.get("file_type") != file_type:
+        return False
+    if source and file_meta.get("source") != source:
+        return False
+    return True
+
 
 async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
     args = args or {}
 
     query = str(args.get("query", "")).strip()
     limit = int(args.get("limit", 10))
+    domain = args.get("domain")
+    file_type = args.get("file_type")
+    source = args.get("source")
+
+    if domain is not None:
+        domain = str(domain).strip() or None
+    if file_type is not None:
+        file_type = str(file_type).strip() or None
+    if source is not None:
+        source = str(source).strip() or None
 
     if not query:
         raise ValueError("query is required")
@@ -157,6 +185,9 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             "ok": True,
             "query": query,
             "limit": limit,
+            "domain": domain,
+            "file_type": file_type,
+            "source": source,
             "hits": [],
             "hits_total": 0,
             "reason": "vector_index.json not found; run knowledge_build_embeddings first",
@@ -172,6 +203,9 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             "ok": True,
             "query": query,
             "limit": limit,
+            "domain": domain,
+            "file_type": file_type,
+            "source": source,
             "hits": [],
             "hits_total": 0,
             "reason": "vector index is empty",
@@ -184,6 +218,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     hits: List[Tuple[float, Dict[str, Any]]] = []
+    filtered_file_count = 0
 
     for item in items:
         file_id = item.get("file_id", "")
@@ -192,6 +227,30 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
 
         if not manifest_rel:
             continue
+
+        file_meta = {
+            "domain": item.get("domain"),
+            "file_type": item.get("file_type"),
+            "source": item.get("source"),
+        }
+
+        if not any(file_meta.values()):
+            full_meta = _load_file_meta(sandbox_root=sandbox_root, file_id=file_id)
+            file_meta = {
+                "domain": full_meta.get("domain"),
+                "file_type": full_meta.get("file_type"),
+                "source": full_meta.get("source"),
+            }
+
+        if not _match_filters(
+            file_meta=file_meta,
+            domain=domain,
+            file_type=file_type,
+            source=source,
+        ):
+            continue
+
+        filtered_file_count += 1
 
         manifest_path = sandbox_root / manifest_rel
         if not manifest_path.exists():
@@ -250,6 +309,9 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
                 "start": row.get("start"),
                 "end": row.get("end"),
                 "search_mode": "semantic",
+                "domain": file_meta.get("domain"),
+                "file_type": file_meta.get("file_type"),
+                "source": file_meta.get("source"),
             }
             hits.append((rerank_score, hit))
 
@@ -260,9 +322,13 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         "ok": True,
         "query": query,
         "limit": limit,
+        "domain": domain,
+        "file_type": file_type,
+        "source": source,
         "model_name": model_name,
         "hits": top_hits,
         "hits_total": len(hits),
+        "filtered_file_count": filtered_file_count,
     }
 
 
@@ -276,6 +342,9 @@ TOOL = ToolSpec(
         "properties": {
             "query": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "domain": {"type": ["string", "null"]},
+            "file_type": {"type": ["string", "null"]},
+            "source": {"type": ["string", "null"]},
         },
         "required": ["query"],
     },

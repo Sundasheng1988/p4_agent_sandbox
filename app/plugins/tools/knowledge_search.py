@@ -38,51 +38,88 @@ def _snippet(text: str, q: str, window: int = 80) -> str:
 
 def _score_text(text: str, q: str) -> int:
     """
-    简单规则得分：
-    - 出现次数越多得分越高
-    - 单词边界匹配额外加分（英文）
+    chunk 级 keyword/full-text 打分：
+    - query 整串出现次数
+    - 英文 token / 数字 token / 下划线 token 命中
+    - 英文单词边界额外加分
+    - 中文短语命中
     """
     if not text or not q:
         return 0
+
     t = text.lower()
     ql = q.lower().strip()
     if not ql:
         return 0
 
-    # 基础：出现次数
-    count = t.count(ql)
+    score = 0
 
-    # 英文单词边界加权（对 alice/rabbit 这类更友好）
-    word_bonus = 0
-    if re.fullmatch(r"[a-z0-9_]+", ql):
-        word_bonus = len(re.findall(rf"\b{re.escape(ql)}\b", t))
+    # 1) query 整串命中
+    whole_count = t.count(ql)
+    score += whole_count * 8
 
-    return count * 3 + word_bonus * 5
+    # 2) 英文 token / 数字 token / 下划线 token
+    en_tokens = re.findall(r"[a-z0-9_\-]{2,}", ql)
+    for tok in en_tokens:
+        count = t.count(tok)
+        score += count * 3
+        if re.fullmatch(r"[a-z0-9_]+", tok):
+            word_bonus = len(re.findall(rf"\b{re.escape(tok)}\b", t))
+            score += word_bonus * 5
+
+    # 3) 中文短语切分（极简）
+    zh_parts = re.findall(r"[\u4e00-\u9fff]{2,}", q)
+    for part in zh_parts:
+        part = part.strip().lower()
+        if not part:
+            continue
+        count = t.count(part)
+        score += count * 4
+
+    return score
 
 
-async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
-    args = args or {}
-    query = _normalize(str(args.get("query", "")))
-    limit = int(args.get("limit", 10))
-    mode = _normalize(str(args.get("mode", "summary"))).lower()  # summary | text
+def _load_file_meta(sandbox_root: Path, file_id: str) -> Dict[str, Any]:
+    meta_path = sandbox_root / "uploads" / file_id / "meta.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return _safe_load_json(meta_path)
+    except Exception:
+        return {}
 
-    if not query:
-        raise ValueError("query is required")
-    if limit < 1 or limit > 50:
-        raise ValueError("limit must be 1..50")
-    if mode not in ("summary", "text"):
-        raise ValueError("mode must be 'summary' or 'text'")
 
-    sandbox_root = Path(ctx.sandbox_root)
-    artifacts_dir = sandbox_root / "artifacts"
-    knowledge_dir = artifacts_dir / "knowledge"
+def _meta_match(
+    meta: Dict[str, Any],
+    domain: str | None,
+    file_type: str | None,
+    source: str | None,
+) -> bool:
+    if domain is not None and str(meta.get("domain")) != str(domain):
+        return False
+    if file_type is not None and str(meta.get("file_type")) != str(file_type):
+        return False
+    if source is not None and str(meta.get("source")) != str(source):
+        return False
+    return True
 
-    if not knowledge_dir.exists():
-        return {"ok": True, "query": query, "hits": [], "reason": "knowledge_dir not found"}
 
+def _build_summary_hits(
+    *,
+    sandbox_root: Path,
+    knowledge_dir: Path,
+    query: str,
+    limit: int,
+    domain: str | None,
+    file_type: str | None,
+    source: str | None,
+) -> Dict[str, Any]:
+    """
+    summary 模式：保留文件级搜索
+    """
     hits: List[Tuple[int, Dict[str, Any]]] = []
+    filtered_file_ids = set()
 
-    # 扫描所有 summary.json
     for p in sorted(knowledge_dir.glob("*.summary.json")):
         try:
             rec = _safe_load_json(p)
@@ -94,51 +131,207 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         summary = rec.get("summary") or ""
         source_chars = int(rec.get("source_chars") or 0)
 
-        # 选择搜索域
-        if mode == "summary":
-            corpus = summary
-        elif mode == "text":
-            try:
-                parsed = await ctx.file_service.parse_text_by_id(file_id=file_id)
-                corpus = parsed.get("text", "")
-            except Exception:
-                corpus = ""
+        meta = _load_file_meta(sandbox_root, file_id=file_id)
+        if not _meta_match(meta, domain=domain, file_type=file_type, source=source):
+            continue
 
-        else:
-            corpus = summary
+        filtered_file_ids.add(file_id)
 
-        score = _score_text(corpus, query)
-        corpus_chars = len(corpus)
+        score = _score_text(summary, query)
         if score <= 0:
             continue
 
-        hits.append(
-            (
-                score,
-                {
-                    "file_id": file_id,
-                    "filename": filename,
-                    "score": score,
-                    "snippet": _snippet(corpus, query),
-                    "source_chars": source_chars,
-                    # 新增字段
-                    "corpus_chars": corpus_chars,
-                    "search_mode": mode,
-                    "record_path": str(p.relative_to(sandbox_root)),
-                },
-            )
-        )
+        hit = {
+            "file_id": file_id,
+            "filename": filename,
+            "chunk_id": None,
+            "chunk_index": None,
+            "score": score,
+            "snippet": _snippet(summary, query),
+            "source_chars": source_chars,
+            "corpus_chars": len(summary),
+            "search_mode": "summary",
+            "record_path": str(p.relative_to(sandbox_root)),
+            "section_title": "",
+            "heading_level": 0,
+            "section_path": [],
+            "start": None,
+            "end": None,
+            "domain": meta.get("domain"),
+            "file_type": meta.get("file_type"),
+            "source": meta.get("source"),
+        }
+        hits.append((score, hit))
 
     hits.sort(key=lambda x: x[0], reverse=True)
     top = [h for _, h in hits[:limit]]
+
+    return {
+        "hits": top,
+        "hits_total": len(hits),
+        "filtered_file_count": len(filtered_file_ids),
+    }
+
+
+def _build_text_hits(
+    *,
+    sandbox_root: Path,
+    chunks_dir: Path,
+    query: str,
+    limit: int,
+    domain: str | None,
+    file_type: str | None,
+    source: str | None,
+) -> Dict[str, Any]:
+    """
+    text 模式：chunk 级搜索
+    """
+    hits: List[Tuple[int, Dict[str, Any]]] = []
+    filtered_file_ids = set()
+
+    for p in sorted(chunks_dir.glob("*.chunks.json")):
+        try:
+            rec = _safe_load_json(p)
+        except Exception:
+            continue
+
+        file_id = rec.get("file_id") or p.stem.replace(".chunks", "")
+        filename = rec.get("filename") or ""
+        chunks = rec.get("chunks", []) or []
+
+        meta = _load_file_meta(sandbox_root, file_id=file_id)
+        if not _meta_match(meta, domain=domain, file_type=file_type, source=source):
+            continue
+
+        filtered_file_ids.add(file_id)
+
+        for c in chunks:
+            text = str(c.get("text", "") or "")
+            score = _score_text(text, query)
+            if score <= 0:
+                continue
+
+            hit = {
+                "file_id": file_id,
+                "filename": filename,
+                "chunk_id": c.get("chunk_id"),
+                "chunk_index": c.get("chunk_index"),
+                "score": score,
+                "snippet": _snippet(text, query),
+                "source_chars": len(text),
+                "corpus_chars": len(text),
+                "search_mode": "text",
+                "record_path": str(p.relative_to(sandbox_root)),
+                "section_title": c.get("section_title", "") or "",
+                "heading_level": int(c.get("heading_level", 0) or 0),
+                "section_path": c.get("section_path", []) or [],
+                "start": c.get("start"),
+                "end": c.get("end"),
+                "domain": meta.get("domain"),
+                "file_type": meta.get("file_type"),
+                "source": meta.get("source"),
+            }
+            hits.append((score, hit))
+
+    hits.sort(key=lambda x: x[0], reverse=True)
+    top = [h for _, h in hits[:limit]]
+
+    return {
+        "hits": top,
+        "hits_total": len(hits),
+        "filtered_file_count": len(filtered_file_ids),
+    }
+
+
+async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
+    args = args or {}
+
+    query = _normalize(str(args.get("query", "")))
+    limit = int(args.get("limit", 10))
+    mode = _normalize(str(args.get("mode", "summary"))).lower()  # summary | text
+
+    domain = args.get("domain")
+    file_type = args.get("file_type")
+    source = args.get("source")
+
+    if domain is not None:
+        domain = _normalize(str(domain)) or None
+    if file_type is not None:
+        file_type = _normalize(str(file_type)) or None
+    if source is not None:
+        source = _normalize(str(source)) or None
+
+    if not query:
+        raise ValueError("query is required")
+    if limit < 1 or limit > 50:
+        raise ValueError("limit must be 1..50")
+    if mode not in ("summary", "text"):
+        raise ValueError("mode must be 'summary' or 'text'")
+
+    sandbox_root = Path(ctx.sandbox_root)
+    artifacts_dir = sandbox_root / "artifacts"
+    knowledge_dir = artifacts_dir / "knowledge"
+    chunks_dir = artifacts_dir / "chunks"
+
+    if mode == "summary":
+        if not knowledge_dir.exists():
+            return {
+                "ok": True,
+                "query": query,
+                "mode": mode,
+                "limit": limit,
+                "domain": domain,
+                "file_type": file_type,
+                "source": source,
+                "hits": [],
+                "reason": "knowledge_dir not found",
+            }
+
+        out = _build_summary_hits(
+            sandbox_root=sandbox_root,
+            knowledge_dir=knowledge_dir,
+            query=query,
+            limit=limit,
+            domain=domain,
+            file_type=file_type,
+            source=source,
+        )
+
+    else:
+        if not chunks_dir.exists():
+            return {
+                "ok": True,
+                "query": query,
+                "mode": mode,
+                "limit": limit,
+                "domain": domain,
+                "file_type": file_type,
+                "source": source,
+                "hits": [],
+                "reason": "chunks_dir not found",
+            }
+
+        out = _build_text_hits(
+            sandbox_root=sandbox_root,
+            chunks_dir=chunks_dir,
+            query=query,
+            limit=limit,
+            domain=domain,
+            file_type=file_type,
+            source=source,
+        )
 
     return {
         "ok": True,
         "query": query,
         "mode": mode,
         "limit": limit,
-        "hits": top,
-        "hits_total": len(hits),
+        "domain": domain,
+        "file_type": file_type,
+        "source": source,
+        "hits": out["hits"],
+        "hits_total": out["hits_total"],
+        "filtered_file_count": out["filtered_file_count"],
     }
 
 
@@ -146,13 +339,16 @@ TOOL = ToolSpec(
     name="knowledge_search",
     handler=_handler,
     risk="low",
-    description="Search in knowledge corpus by summary or parsed text (baseline keyword/full-text search).",
+    description="Search in knowledge corpus by summary or chunk-level parsed text.",
     args_schema={
         "type": "object",
         "properties": {
             "query": {"type": "string"},
             "mode": {"type": "string", "enum": ["summary", "text"]},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "domain": {"type": ["string", "null"]},
+            "file_type": {"type": ["string", "null"]},
+            "source": {"type": ["string", "null"]},
         },
         "required": ["query"],
     },

@@ -12,6 +12,7 @@ from typing import Dict, Any
 
 from app.core.audit import AuditLogger
 from app.core.storage import TaskStore
+from app.core.metadata import build_upload_metadata
 
 
 class FileService:
@@ -47,43 +48,85 @@ class FileService:
         with open(raw_path, "wb") as f:
             f.write(data)
 
-        meta = {
-            "file_id": file_id,
-            "filename": filename,
-            "mime": mime,
-            "ext": ext,
-            "size": size,
-            "sha256": sha256,
-            "rel_dir": rel_dir,
-            "raw_name": raw_name,
-            "created_at": created_at,
-        }
+        # 只取一小段文本样本做 domain 初判，避免大文件开销
+        text_sample = ""
+        if ext in {"txt", "md", "py", "json", "yaml", "yml", "csv"}:
+            try:
+                text_sample = data[:4000].decode("utf-8", errors="replace")
+            except Exception:
+                text_sample = ""
+
+        meta = build_upload_metadata(
+            file_id=file_id,
+            filename=filename,
+            mime=mime,
+            ext=ext,
+            size=size,
+            sha256=sha256,
+            rel_dir=rel_dir,
+            raw_name=raw_name,
+            created_at=created_at,
+            text_sample=text_sample,
+            source="upload",
+        )
 
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        await self.store.upsert_file(meta)
+        # SQLite 先保持老 schema，避免现在改表结构
+        db_meta = {
+            "file_id": meta["file_id"],
+            "filename": meta["filename"],
+            "mime": meta["mime"],
+            "ext": meta["ext"],
+            "size": meta["size"],
+            "sha256": meta["sha256"],
+            "rel_dir": meta["rel_dir"],
+            "raw_name": meta["raw_name"],
+            "created_at": meta["created_at"],
+        }
+        await self.store.upsert_file(db_meta)
 
         # 用 file_id 当 trace_id，便于追溯“文件怎么来的”
         self.audit.write(file_id, "file_upload", meta)
 
         return meta
-    
+
     def _file_dir(self, file_id: str) -> str:
-        # uploads/<file_id>/
         return os.path.join(self.uploads_root, file_id)
 
     def _raw_path(self, file_id: str) -> str:
-        # 读 meta.json 以拿到 raw_name（兼容 raw.txt / raw.pdf 等）
         meta_path = os.path.join(self._file_dir(file_id), "meta.json")
         if os.path.exists(meta_path):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             raw_name = meta.get("raw_name") or "raw.txt"
         else:
-            # fallback：历史数据或异常情况
             raw_name = "raw.txt"
         return os.path.join(self._file_dir(file_id), raw_name)
+
+    async def get_meta_by_id(self, file_id: str) -> Dict[str, Any]:
+        meta_path = os.path.join(self._file_dir(file_id), "meta.json")
+        if not os.path.exists(meta_path):
+            raise FileNotFoundError(meta_path)
+
+        with open(meta_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    async def update_meta_by_id(self, file_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+        meta_path = os.path.join(self._file_dir(file_id), "meta.json")
+        if not os.path.exists(meta_path):
+            raise FileNotFoundError(meta_path)
+
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+
+        meta.update(patch or {})
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        return meta
 
     async def read_text_by_id(self, file_id: str, max_bytes: int = 200000) -> Dict[str, Any]:
         raw_path = self._raw_path(file_id)
@@ -93,11 +136,9 @@ class FileService:
         with open(raw_path, "rb") as f:
             data = f.read(max_bytes)
 
-        # 先按 utf-8 解码（errors=replace 确保不炸）
         text = data.decode("utf-8", errors="replace")
-
         return {"file_id": file_id, "text": text}
-    
+
     def _strip_gutenberg_header_footer(self, text: str) -> str:
         t = text or ""
         t = t.replace("\r\n", "\n").replace("\r", "\n")
@@ -162,31 +203,22 @@ class FileService:
                         return "\n".join(lines[p:]).strip()
 
         return "\n".join(lines[idx_contents + 1 :]).strip()
-    
+
     def _skip_leading_chapter_list(self, text: str) -> str:
-        """
-        如果文本开头是一串 CHAPTER 标题（目录/章节列表），跳到第一段正文。
-        适配 Gutenberg 常见结构：CHAPTER I/II... 然后才出现正文段落。
-        """
         t = text or ""
         lines = [ln.rstrip() for ln in t.splitlines()]
 
         chap_pat = re.compile(r"^\s*chapter\s+[0-9ivxlcdm]+\b", re.IGNORECASE)
-
-        # 只在“开头区域”做处理，避免误伤正文中的 chapter 引用
         head = lines[:1500]
-
-        # 如果开头区域 chapter 行占比很高，就认为这是目录/章节列表
         chap_lines = [i for i, ln in enumerate(head) if chap_pat.match(ln)]
+
         if len(chap_lines) < 3:
             return t.strip()
 
-        # 从第一个 chapter 行开始往后找“正文句子”
         def looks_like_body(ln: str) -> bool:
             s = ln.strip()
             if len(s) < 60:
                 return False
-            # 正文一般有空格/标点，不是全大写
             if s.isupper():
                 return False
             if " " not in s:
@@ -198,7 +230,6 @@ class FileService:
             if looks_like_body(lines[i]):
                 return "\n".join(lines[i:]).strip()
 
-        # 找不到就保守返回原文
         return t.strip()
 
     def _normalize_whitespace(self, text: str) -> str:
@@ -209,7 +240,7 @@ class FileService:
     def _extract_body_window(self, text: str) -> str:
         t = self._strip_gutenberg_header_footer(text)
         t = self._remove_toc_block(t)
-        t = self._skip_leading_chapter_list(t)   # ✅ 新增这一行
+        t = self._skip_leading_chapter_list(t)
         t = self._normalize_whitespace(t)
         return t
 
@@ -219,14 +250,9 @@ class FileService:
         max_chars: int = 20000,
         max_bytes: int = 200000,
     ) -> Dict[str, Any]:
-        # M2-1 baseline：先只支持 “text-first”，pdf/docx 后面再接你已有的 parse 工具或库
         out = await self.read_text_by_id(file_id=file_id, max_bytes=max_bytes)
         text = out.get("text") or ""
-        # ✅ M2-1.1 正文抽取
         text = self._extract_body_window(text)
-
-        # 🔎 DEBUG 标识：确认是否走到新 parse 逻辑
-        # text = "[PARSE_V2_OK]\n" + text
 
         if len(text) > max_chars:
             text = text[:max_chars]

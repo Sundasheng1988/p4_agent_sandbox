@@ -7,6 +7,10 @@ from app.core.models import TaskRequest, TaskState, ToolCall, StepResult
 from app.core.audit import AuditLogger
 from app.tools.base import SafeToolExecutor
 from app.core.storage import TaskStore
+from app.core.planner import plan_with_llm
+from app.core.verifier import verify_state
+from app.core.router import route_query
+from app.core.query_rewriter import rewrite_query
 
 
 class Orchestrator:
@@ -18,7 +22,7 @@ class Orchestrator:
     def new_trace_id(self) -> str:
         return uuid.uuid4().hex[:16]
 
-    def plan(self, state: TaskState) -> List[ToolCall]:
+    def plan_rule_based(self, state: TaskState) -> List[ToolCall]:
         """
         C1: rule-based planner (no LLM).
         Map user utterance -> tool calls.
@@ -206,7 +210,7 @@ class Orchestrator:
                     name="knowledge_rag_answer",
                     args={
                         "question": rag_q,
-                        "top_k": 5,
+                        "top_k": 10,
                         "max_context_chars": 4000,
                         # 这里改成你本机 Ollama 已经 pull 下来的 Qwen 模型名
                         "model_name": "qwen2.5:7b-instruct",
@@ -257,7 +261,248 @@ class Orchestrator:
 
         return plan
     
-    def verify(self, state: TaskState) -> bool:
+    def plan(self, state: TaskState) -> List[ToolCall]:
+        cfg = self.tool_exec.ctx.config
+        planner_cfg = getattr(cfg, "planner", None)
+
+        mode = getattr(planner_cfg, "mode", "rule") if planner_cfg else "rule"
+        model_name = getattr(planner_cfg, "model_name", "qwen2.5:7b-instruct") if planner_cfg else "qwen2.5:7b-instruct"
+        timeout = int(getattr(planner_cfg, "timeout", 60)) if planner_cfg else 60
+
+        if mode != "llm":
+            self.audit.write(state.trace_id, "planner_mode", {"mode": "rule"})
+            return self.plan_rule_based(state)
+
+        try:
+            allowed_names = sorted(self.tool_exec.ctx.config.policy.allow_tools)
+
+            plan, meta = plan_with_llm(
+                user_input=state.user_input,
+                model_name=model_name,
+                timeout=timeout,
+                allowed_tool_names=allowed_names,
+            )
+
+            self.audit.write(
+                state.trace_id,
+                "planner_llm",
+                {
+                    "mode": "llm",
+                    "meta": meta,
+                    "plan": [c.model_dump() for c in plan],
+                },
+            )
+
+            if not plan:
+                fallback_plan = self.plan_rule_based(state)
+                self.audit.write(
+                    state.trace_id,
+                    "planner_fallback",
+                    {
+                        "reason": "llm_empty_or_invalid_plan",
+                        "fallback_plan": [c.model_dump() for c in fallback_plan],
+                    },
+                )
+                return fallback_plan
+
+            return plan
+
+        except Exception as e:
+            fallback_plan = self.plan_rule_based(state)
+            self.audit.write(
+                state.trace_id,
+                "planner_fallback",
+                {
+                    "reason": f"llm_exception: {e}",
+                    "fallback_plan": [c.model_dump() for c in fallback_plan],
+                },
+            )
+            return fallback_plan
+    
+    def _resolve_ref(self, value: str, context: dict):
+        """
+        支持:
+        $step1.output
+        $step1.output.hits
+        $step2.output.answer
+        """
+        if not isinstance(value, str) or not value.startswith("$"):
+            return value
+
+        expr = value[1:]  # 去掉 $
+        parts = expr.split(".")
+
+        if not parts:
+            return value
+
+        data = context.get(parts[0])
+        for p in parts[1:]:
+            if isinstance(data, dict):
+                data = data.get(p)
+            else:
+                return None
+
+        return data
+
+    def _resolve_args(self, args: dict, context: dict) -> dict:
+        resolved = {}
+
+        for k, v in (args or {}).items():
+            if isinstance(v, str) and v.startswith("$"):
+                resolved[k] = self._resolve_ref(v, context)
+            else:
+                resolved[k] = v
+
+        return resolved
+    
+    def _inject_route_args(self, call_name: str, resolved_args: dict) -> dict:
+        """
+        对知识类检索/问答工具自动注入 route 结果。
+        当前只处理：
+        - knowledge_semantic_search -> 基于 query route
+        - knowledge_rag_answer      -> 基于 question route
+        """
+        args = dict(resolved_args or {})
+
+        route_text = None
+
+        if call_name == "knowledge_semantic_search":
+            route_text = str(args.get("query", "")).strip()
+
+        elif call_name == "knowledge_rag_answer":
+            route_text = str(args.get("question", "")).strip()
+
+        if not route_text:
+            return args
+
+        route = route_query(route_text)
+
+        # 只有用户/上游没有显式传入时，才自动补
+        args.setdefault("domain", route.domain)
+        args.setdefault("file_type", route.file_type)
+        args.setdefault("source", route.source)
+
+        return args
+    
+    def _rewrite_and_inject_route_args(self, call_name: str, resolved_args: dict) -> tuple[dict, dict]:
+        """
+        对知识类检索/问答工具先做 query rewrite，再做 route 注入。
+
+        返回:
+        - final_args: 最终用于执行 tool 的参数
+        - rewrite_info: 记录 rewrite 详情，便于 audit/debug
+        """
+        args = dict(resolved_args or {})
+        rewrite_info = {
+            "applied": False,
+            "rewrite_mode": None,
+            "original_query": None,
+            "rewritten_query": None,
+            "reason": "",
+            "meta": {},
+        }
+
+        query_key = None
+        original_text = None
+
+        if call_name == "knowledge_semantic_search":
+            query_key = "query"
+            original_text = str(args.get("query", "")).strip()
+
+        elif call_name == "knowledge_rag_answer":
+            query_key = "question"
+            original_text = str(args.get("question", "")).strip()
+
+        else:
+            # 非知识检索类工具，不做 rewrite/route
+            return args, rewrite_info
+
+        if not original_text:
+            return args, rewrite_info
+
+        # 第一版先默认 rule，可后续切配置
+        rw = rewrite_query(
+            original_text,
+            mode="rule",
+            model_name="qwen2.5:7b-instruct",
+            timeout=30,
+        )
+
+        rewritten_text = str(rw.get("rewritten_query", "")).strip() or original_text
+
+        rewrite_info = {
+            "applied": bool(rw.get("applied", False)),
+            "rewrite_mode": rw.get("rewrite_mode"),
+            "original_query": rw.get("original_query"),
+            "rewritten_query": rewritten_text,
+            "reason": rw.get("reason", ""),
+            "meta": rw.get("meta", {}),
+        }
+
+        # 把 rewrite 后的 query 回填给 tool
+        args[query_key] = rewritten_text
+
+        # 再基于 rewrite 后的文本做 route
+        route = route_query(rewritten_text)
+
+        if "domain" not in args:
+            args["domain"] = route.domain
+        if "file_type" not in args:
+            args["file_type"] = route.file_type
+        if "source" not in args:
+            args["source"] = route.source
+
+        return args, rewrite_info
+
+    async def _run_verified_retry(self, trace_id: str, state: TaskState, suggested_plan: List[ToolCall]) -> None:
+        """
+        M4.3 第一版：
+        只执行 verifier 给出的 retry plan，
+        执行结果直接追加到现有 step_results 中。
+        """
+        if not suggested_plan:
+            return
+        
+        # TODO: 后续如果 verifier retry 需要引用原步骤结果，
+        # 这里要把主执行上下文传进来，而不是重新创建空 context。
+        context = {}
+
+        for i, call in enumerate(suggested_plan, start=1):
+            try:
+                resolved_args = self._resolve_args(call.args, context)
+                final_args, rewrite_info = self._rewrite_and_inject_route_args(call.name, resolved_args)
+
+                self.audit.write(
+                    trace_id,
+                    "verify_retry_step",
+                    {
+                        "step_id": call.id or f"retry{i}",
+                        "tool": call.name,
+                        "raw_args": call.args,
+                        "resolved_args": resolved_args,
+                        "final_args": final_args,
+                        "rewrite_info": rewrite_info,
+                    },
+                )
+
+                out = await self.tool_exec.call(trace_id, call.name, final_args)
+                state.plan.append(call)
+                state.step_results.append(StepResult(ok=True, output=out))
+
+                context_key = call.id or f"retry{i}"
+                context[context_key] = {
+                    "tool": call.name,
+                    "args": final_args,
+                    "output": out,
+                    "rewrite_info": rewrite_info,
+                }
+
+            except Exception as e:
+                state.plan.append(call)
+                state.step_results.append(StepResult(ok=False, error=str(e)))
+                break
+    
+    def verify_basic(self, state: TaskState) -> bool:
         return all(r.ok for r in state.step_results)
 
     def report(self, state: TaskState) -> str:
@@ -267,9 +512,18 @@ class Orchestrator:
                 f"（C1 runtime 已就绪：policy/audit/tool wrapper/state machine）\n"
                 f"你可以试试：列出已上传文件 / 文件 <id> 信息 / 读取 <id>"
             )
+        
+        verify_result = state.verify_result or {}
+        verify_result_after_retry = state.verify_result_after_retry or {}
+        final_verify = verify_result_after_retry or verify_result
+        final_verify_reason = final_verify.get("reason", "")
 
-        # ===== RAG问答友好输出 =====
-        if len(state.plan) == 1 and state.plan[0].name == "knowledge_rag_answer":
+        # ===== 1) 单步 RAG：成功时给用户友好答案 =====
+        if (
+            len(state.plan) == 1
+            and state.plan[0].name == "knowledge_rag_answer"
+            and state.status == "done"
+        ):
             res = state.step_results[0]
 
             if not res.ok:
@@ -296,13 +550,144 @@ class Orchestrator:
                     lines.append(f"- {filename} / {chunk_id} / score={score}")
 
             return "\n".join(lines)
+        
+        # ===== 1.5) 单步 RAG：最终失败时给清晰说明 =====
+        if (
+            len(state.plan) == 1
+            and state.plan[0].name == "knowledge_rag_answer"
+            and state.status == "failed"
+        ):
+            res = state.step_results[0]
 
-        # ===== 默认调试输出 =====
+            if not res.ok:
+                return f"知识问答失败：{res.error}"
+
+            output = res.output if isinstance(res.output, dict) else {}
+            question = output.get("question", state.user_input)
+            answer = str(output.get("answer", "")).strip()
+
+            lines = []
+            lines.append(f"问题：{question}")
+            lines.append("")
+
+            if "未在知识库中找到明确答案" in answer:
+                lines.append("结果：未在知识库中找到可靠答案。")
+                lines.append("")
+                lines.append("原因：检索虽然返回了一些相似内容，但校验阶段判断这些内容与问题不够相关。")
+            else:
+                lines.append("结果：答案生成完成，但未通过可靠性校验。")
+
+            return "\n".join(lines)
+
+        # ===== 2) 单步搜索：成功时给简洁摘要 =====
+        if len(state.plan) == 1 and state.plan[0].name in {"knowledge_search", "knowledge_semantic_search"}:
+            call = state.plan[0]
+            res = state.step_results[0]
+
+            if not res.ok:
+                return f"{call.name} 执行失败：{res.error}"
+
+            output = res.output if isinstance(res.output, dict) else {}
+            hits = output.get("hits", []) or []
+            query = output.get("query", call.args.get("query", state.user_input))
+
+            lines = []
+            lines.append(f"查询：{query}")
+            lines.append("")
+
+            if state.status == "failed":
+                lines.append("结果：未找到可靠结果。")
+            
+                if final_verify_reason == "strong_token_not_covered":
+                    lines.append("")
+                    lines.append("原因：搜索虽返回了一些相似内容，但未覆盖关键标识词，结果不可靠。")
+                elif final_verify_reason == "low_relevance_semantic_hits":
+                    lines.append("")
+                    lines.append("原因：搜索结果相关性较弱，未通过校验。")
+
+            else:
+                lines.append(f"结果：找到 {len(hits)} 条相关内容。")
+
+            if hits:
+                lines.append("")
+                lines.append("前3条结果：")
+                for i, h in enumerate(hits[:3], start=1):
+                    filename = h.get("filename", "")
+                    chunk_id = h.get("chunk_id", "")
+                    snippet = str(h.get("snippet", "")).strip().replace("\n", " ")
+                    if len(snippet) > 80:
+                        snippet = snippet[:80] + "..."
+                    lines.append(f"{i}. {filename} / {chunk_id} / {snippet}")
+
+            return "\n".join(lines)
+
+        # ===== 3) 多步执行：成功 =====
+        if len(state.plan) > 1 and state.status == "done":
+            lines = []
+            lines.append("任务已完成。")
+            lines.append("")
+            lines.append("执行过程：")
+
+            for i, (call, res) in enumerate(zip(state.plan, state.step_results), start=1):
+                step_id = call.id or f"step{i}"
+                status_text = "成功" if res.ok else "失败"
+                lines.append(f"{i}. [{step_id}] {call.name}：{status_text}")
+
+            return "\n".join(lines)
+
+        # ===== 4) 多步执行：最终失败，但把原因讲清楚 =====
+        if len(state.plan) > 1 and state.status == "failed":
+            lines = []
+            lines.append("未得到可靠结果。")
+            lines.append("")
+            lines.append("执行过程：")
+
+            for i, (call, res) in enumerate(zip(state.plan, state.step_results), start=1):
+                step_id = call.id or f"step{i}"
+
+                if res.ok:
+                    lines.append(f"{i}. [{step_id}] {call.name}：执行成功")
+                else:
+                    lines.append(f"{i}. [{step_id}] {call.name}：执行失败（{res.error}）")
+
+            # 针对常见场景补一句人话说明
+            first_call = state.plan[0].name if state.plan else ""
+            first_output = state.step_results[0].output if state.step_results else {}
+            first_output = first_output if isinstance(first_output, dict) else {}
+
+            if first_call == "knowledge_rag_answer":
+                answer = str(first_output.get("answer", "")).strip()
+                if "未在知识库中找到明确答案" in answer:
+                    lines.append("")
+                    lines.append("原因：知识问答未找到明确答案，补充搜索后结果仍不可靠。")
+                else:
+                    lines.append("")
+                    lines.append("原因：虽然完成了工具执行，但校验阶段认为结果不够可靠。")
+
+            elif first_call in {"knowledge_search", "knowledge_semantic_search"}:
+                lines.append("")
+
+                if final_verify_reason == "strong_token_not_covered":
+                    lines.append("原因：搜索虽返回了一些相似内容，但未覆盖关键标识词，结果不可靠。")
+                elif final_verify_reason == "low_relevance_semantic_hits":
+                    lines.append("原因：搜索结果相关性较弱，未通过校验。")
+                elif final_verify_reason == "knowledge_search_empty":
+                    lines.append("原因：首轮搜索未命中，补充检索后仍未得到可靠结果。")
+                elif final_verify_reason == "knowledge_semantic_search_empty":
+                    lines.append("原因：补充语义检索后仍未找到有效结果。")
+                else:
+                    lines.append("原因：虽然搜索返回了内容，但校验阶段认为相关性不足，结果不可靠。")
+
+            else:
+                lines.append("")
+                lines.append("原因：工具执行虽已完成，但最终校验未通过。")
+
+            return "\n".join(lines)
+
+        # ===== 5) 默认兜底 =====
         lines = []
-
         for i, (call, res) in enumerate(zip(state.plan, state.step_results), start=1):
             lines.append(f"[{i}] tool={call.name} ok={res.ok}")
-
             if res.ok:
                 lines.append(str(res.output))
             else:
@@ -325,6 +710,8 @@ class Orchestrator:
         if debug:
             data["plan"] = [c.model_dump() for c in state.plan]
             data["step_results"] = [r.model_dump() for r in state.step_results]
+            data["verify_result"] = getattr(state, "verify_result", {})
+            data["verify_result_after_retry"] = getattr(state, "verify_result_after_retry", {})
 
         return data
 
@@ -344,24 +731,131 @@ class Orchestrator:
             state.status = "executing"
             await self.store.update_task(trace_id, state.status)
 
-            for call in state.plan:
+            # M4.1
+            # for call in state.plan:
+            #     try:
+            #         out = await self.tool_exec.call(trace_id, call.name, call.args)
+            #         state.step_results.append(StepResult(ok=True, output=out))
+            #     except Exception as e:
+            #         state.step_results.append(StepResult(ok=False, error=str(e)))
+            
+            # M4.2 multi-step execution loop
+            context = {}
+
+            for i, call in enumerate(state.plan, start=1):
                 try:
-                    out = await self.tool_exec.call(trace_id, call.name, call.args)
+                    resolved_args = self._resolve_args(call.args, context)
+                    final_args, rewrite_info = self._rewrite_and_inject_route_args(call.name, resolved_args)
+
+                    self.audit.write(
+                        trace_id,
+                        "step_resolved",
+                        {
+                            "step_id": call.id or f"step{i}",
+                            "tool": call.name,
+                            "raw_args": call.args,
+                            "resolved_args": resolved_args,
+                            "final_args": final_args,
+                            "rewrite_info": rewrite_info,
+                        },
+                    )
+
+                    out = await self.tool_exec.call(trace_id, call.name, final_args)
                     state.step_results.append(StepResult(ok=True, output=out))
+
+                    context_key = call.id or f"step{i}"
+                    context[context_key] = {
+                        "tool": call.name,
+                        "args": final_args,
+                        "output": out,
+                        "rewrite_info": rewrite_info,
+                    }
+
                 except Exception as e:
                     state.step_results.append(StepResult(ok=False, error=str(e)))
+
+                    context_key = call.id or f"step{i}"
+                    context[context_key] = {
+                        "tool": call.name,
+                        "args": call.args,
+                        "output": None,
+                        "error": str(e),
+                    }
+
+                    # 当前 M4.2 先做“遇错即停”
+                    break
 
             # VERIFY
             state.status = "verifying"
             await self.store.update_task(trace_id, state.status)
-            ok = self.verify(state)
+
+            basic_ok = self.verify_basic(state)
+
+            verify_out = verify_state(state)
+            state.verify_result = verify_out
+
+            self.audit.write(
+                trace_id,
+                "verify_result",
+                {
+                    "basic_ok": basic_ok,
+                    "verify_ok": verify_out.get("ok"),
+                    "verify_status": verify_out.get("status"),
+                    "reason": verify_out.get("reason"),
+                    "detail": verify_out.get("detail"),
+                    "action": verify_out.get("action"),
+                    "metrics": verify_out.get("metrics", {}),
+                    "suggested_plan": [
+                        c.model_dump() for c in verify_out.get("suggested_plan", [])
+                    ],
+                },
+            )
+
+            verify_status = verify_out.get("status", "fatal")
+            action = verify_out.get("action", "fallback")
+            suggested_plan = verify_out.get("suggested_plan", []) or []
+
+            if not basic_ok:
+                ok = False
+
+            elif verify_status == "pass":
+                ok = True
+
+            elif action == "retry" and suggested_plan:
+                await self._run_verified_retry(trace_id, state, suggested_plan)
+
+                verify_out_2 = verify_state(state)
+                state.verify_result_after_retry = verify_out_2
+
+                self.audit.write(
+                    trace_id,
+                    "verify_result_after_retry",
+                    {
+                        "verify_ok": verify_out_2.get("ok"),
+                        "verify_status": verify_out_2.get("status"),
+                        "reason": verify_out_2.get("reason"),
+                        "detail": verify_out_2.get("detail"),
+                        "action": verify_out_2.get("action"),
+                        "metrics": verify_out_2.get("metrics", {}),
+                    },
+                )
+
+                ok = (
+                    all(r.ok for r in state.step_results)
+                    and verify_out_2.get("status") == "pass"
+                )
+
+            elif action == "fallback":
+                ok = False
+
+            else:
+                ok = False
 
             # REPORT
-            state.status = "reporting"
+            state.status = "done" if ok else "failed"
             await self.store.update_task(trace_id, state.status)
 
             state.final_answer = self.report(state)
-            state.status = "done" if ok else "failed"
 
             self.audit.write(trace_id, "task_end", {"status": state.status})
             await self.store.update_task(trace_id, state.status, ended=True)

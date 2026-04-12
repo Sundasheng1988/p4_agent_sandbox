@@ -23,6 +23,11 @@ policy:
     - knowledge_rag_answer
     - knowledge_reset
 
+planner:
+  mode: "rule"   # llm | rule
+  model_name: "qwen2.5:7b-instruct"
+  timeout: 60
+
 server:
   host: "127.0.0.1"
   port: 8000

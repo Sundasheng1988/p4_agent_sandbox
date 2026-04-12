@@ -24,10 +24,18 @@ class ServerConfig:
 
 
 @dataclass
+class PlannerConfig:
+    mode: str
+    model_name: str
+    timeout: int
+
+
+@dataclass
 class Config:
     app: AppConfig
     policy: PolicyConfig
     server: ServerConfig
+    planner: PlannerConfig
 
 
 def load_config(path: str = "config.yaml") -> Config:
@@ -40,6 +48,7 @@ def load_config(path: str = "config.yaml") -> Config:
     app = data.get("app", {})
     policy = data.get("policy", {})
     server = data.get("server", {})
+    planner = data.get("planner", {})
 
     cfg = Config(
         app=AppConfig(
@@ -53,6 +62,11 @@ def load_config(path: str = "config.yaml") -> Config:
         server=ServerConfig(
             host=str(server.get("host", "127.0.0.1")),
             port=int(server.get("port", 8000)),
+        ),
+        planner=PlannerConfig(
+            mode=str(planner.get("mode", "rule")).strip().lower(),
+            model_name=str(planner.get("model_name", "qwen2.5:7b-instruct")).strip(),
+            timeout=int(planner.get("timeout", 60)),
         ),
     )
     return cfg

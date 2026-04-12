@@ -456,3 +456,1177 @@ RAG：✅ 可用
 稳定 Top1 命中
 可解释排序（score / bonus）
 可控噪声
+
+## 📅 2026-03-24
+### 🎯 阶段：M3 RAG Runtime 收尾固化完成
+
+---
+
+## 🧩 本日核心工作
+
+本日目标为对 M3（RAG Runtime）进行收尾与工程固化，确保系统具备：
+
+- 可用性
+- 稳定性
+- 可恢复能力（reset）
+- 可持续演进能力（进入 M4 前提）
+
+---
+
+## ✅ 1. Chunk 结构优化（已完成）
+
+### 优化内容
+- 引入结构化 Markdown chunk（section_title）
+- 按语义分块，而非纯长度切分
+- 提高检索精度（title-level recall）
+
+### 新能力
+- chunk 具备：
+  - `chunk_id`
+  - `section_title`
+  - `content`
+
+---
+
+## ✅ 2. 噪声块过滤（纯标题块）
+
+### 问题
+存在如下无效 chunk：
+
+```text
+Ops Playbook
+（无正文）
+解决
+
+在 chunking 阶段增加过滤逻辑：
+
+若：
+content 为空
+或仅包含标题
+→ 直接丢弃
+收益
+提升 embedding 质量
+避免语义污染
+提高 RAG 命中率
+✅ 3. Rerank 权重收敛（稳定性优化）
+调整内容
+项目	原值	调整后
+标题完全命中	0.20	0.16
+标题关键词累计上限	0.16	0.12
+snippet 命中上限	0.06	0.04
+目标
+防止 rerank 过拟合
+降低标题 bias
+提升整体排序稳定性
+✅ 4. knowledge_reset 工具（关键能力）
+功能
+
+新增运维工具：
+
+knowledge_reset
+
+支持：
+
+项目	默认
+reset_db	✅
+reset_artifacts	✅
+reset_logs	❌
+reset_uploads	❌
+能力说明
+1. 数据库重置
+删除 db/app.db
+自动重建表结构
+2. 知识运行数据清理
+
+清空：
+
+artifacts/knowledge
+artifacts/chunks
+artifacts/vectors
+artifacts/vector_manifests
+各类 index.json
+3. 保留原始数据（Soft Reset）
+uploads 不删除
+logs 不删除
+验证结果（已通过）
+✔ artifacts 清空
+find artifacts -type f
+# → 空
+✔ DB 清空
+SELECT COUNT(*) FROM files → 0
+SELECT COUNT(*) FROM tasks → 0
+✔ RAG 失效（符合预期）
+error: vector_index.json not found
+hits: []
+✔ uploads 保留
+ls uploads
+# → 存在
+结论
+
+knowledge_reset 已达到工程级可靠性，可作为运行时维护工具使用
+
+✅ 5. Git 提交（M3 收官）
+提交记录
+feat(M3): finalize RAG stabilization
+feat(M3): add knowledge_reset tool and verify runtime cleanup flow
+本次变更包含
+chunking 重构
+rerank 优化
+semantic search 稳定性增强
+RAG pipeline 优化
+knowledge_reset 工具
+test_kb 测试集
+文档更新（dev_log / roadmap）
+
+
+# 2026-03-29
+
+## M4.1 Agent Intelligence：LLM Planner v1 打通
+
+今天完成了 M4.1 的第一阶段：  
+将 **LLM Planner** 正式接入 Orchestrator，使系统从纯 rule-based 规划升级为：
+
+User Input  
+↓  
+LLM Planner  
+↓  
+Tool Plan  
+↓  
+SafeToolExecutor  
+↓  
+Tool Result  
+↓  
+Fallback（如有需要）
+
+---
+
+### 新增能力
+
+实现内容：
+
+- 在 `config.yaml` 中加入 `planner` 配置
+- 在 `config.py` 中补充 `PlannerConfig`
+- 在 `orchestrator.py` 中加入：
+  - `plan_rule_based()`
+  - `plan()`（LLM 优先，失败时 fallback）
+- 新增 `app/core/planner.py`
+- 接入本地 Ollama / Qwen 作为 Planner 模型
+- 支持 planner 审计事件：
+  - `planner_llm`
+  - `planner_fallback`
+
+---
+
+### Planner 机制
+
+当前模式：
+
+- `planner.mode = "llm"`：优先使用 LLM Planner
+- 若 LLM 输出为空、JSON 非法、或抛异常：
+  - 自动 fallback 到 `plan_rule_based()`
+
+当前限制：
+
+- 仅允许 **0 或 1 个 step**
+- 输出必须为 JSON 数组
+- 每个 step 格式：
+  - `{"name": "...", "args": {...}}`
+
+---
+
+### Prompt 调优
+
+针对早期误判问题，重写 Planner Prompt，重点强化了三类工具边界：
+
+1. **构建类工具**
+   - `knowledge_build_index`
+   - `knowledge_build_chunks`
+   - `knowledge_build_embeddings`
+
+2. **搜索类工具**
+   - `knowledge_search`
+   - `knowledge_semantic_search`
+
+3. **问答类工具**
+   - `knowledge_rag_answer`
+
+同时明确要求：
+
+- “找、看看、了解、查找、找出来”  
+  优先走搜索类工具
+- “构建、生成、重建索引/文本块/向量”  
+  才走构建类工具
+- “什么是、如何、怎么、为什么”  
+  优先走问答类工具
+
+---
+
+### Bug 修复
+
+修复了 Planner 执行中的关键异常：
+
+- `local variable 'raw_text' referenced before assignment`
+
+原因：
+- `generate_with_ollama()` 异常时，异常分支提前引用了未定义的 `raw_text`
+
+修复方式：
+- 将 LLM 调用整体纳入 `try/except`
+- 为 `raw_text / parsed_json / llm_out` 提供安全默认值
+- 增加空输出保护：
+  - `empty planner output`
+
+---
+
+### 验证结果
+
+#### Case 1
+输入：
+
+`把和知识库重建有关的信息帮我找出来`
+
+LLM Planner 输出：
+
+```json
+[{"name":"knowledge_semantic_search","args":{"query":"知识库重建","limit":10}}]
+
+Case 2
+
+输入：
+
+帮我找一下知识库里关于重建知识库的内容
+
+LLM Planner 输出：
+
+[{"name":"knowledge_semantic_search","args":{"query":"重建知识库","limit":10}}]
+
+结果：
+
+工具选择正确
+query 提炼合理
+命中 ops_playbook.md / 如何重建知识库
+Case 3
+
+输入：
+
+我想了解一下这个知识库系统
+
+LLM Planner 输出：
+
+[{"name":"knowledge_semantic_search","args":{"query":"知识库系统","limit":10}}]
+
+结果：
+
+成功将自然语言“了解一下”映射为搜索类工具
+说明 Planner 已具备一定自然语言泛化能力
+Case 4
+
+输入：
+
+知识库如果坏了应该怎么恢复
+
+LLM Planner 输出：
+
+[{"name":"knowledge_semantic_search","args":{"query":"知识库坏了怎么恢复","limit":10}}]
+
+结果：
+
+工具选择正确
+未误选 reset / build 类工具
+搜索意图判断合理
+
+## [M4.2] Multi-step Tool Execution + Context Passing
+
+### 🎯 目标
+让 Agent 支持多步计划执行，并允许步骤之间传递上下文数据。
+
+---
+
+### ✅ 已完成能力
+
+#### 1. 多步计划（Planner）
+- LLM 可生成多步 ToolCall
+- 支持 step id（如 step1 / step2）
+- 支持结构化 plan 输出
+
+示例：
+```json
+[
+  {"id": "step1", "name": "knowledge_semantic_search", ...},
+  {"id": "step2", "name": "knowledge_rag_answer", ...}
+]
+
+#### 2. Execution Loop
+顺序执行 plan
+每步产出 StepResult
+支持失败中断（fail-fast）
+
+#### 3. Step 引用机制（关键能力）
+
+支持：
+
+"extra_context": "$step1.output.hits"
+
+实现：
+
+执行前解析 $stepX.output.xxx
+自动替换为真实数据
+支持嵌套字段访问
+
+#### 4. RAG 上下文注入升级
+
+新增能力：
+
+step1 的 hits → 注入 step2
+拼接到 RAG prompt 中
+
+结构：
+
+知识库上下文:
+...
+
+[Planner Extra Context]
+<step1 hits>
+
+#### 5. knowledge_rag_answer 扩展
+
+新增参数：
+
+extra_context
+
+新增逻辑：
+
+normalize extra_context → string
+注入 run_rag_pipeline
+输出 extra_context_used / preview
+
+#### 6. rag_pipeline 扩展
+
+新增能力：
+
+支持 extra_context
+自动拼接到 prompt
+
+📅 Dev Log — 2026-03-29
+🚧 当前阶段
+
+M4 Agent Intelligence → M4.3 Reflection / Verification（已完成核心流程）
+
+一、今日完成内容
+✅ M4.3 核心能力已实现
+
+本阶段目标：
+
+让系统具备执行后的“自检能力”，能够判断结果是否有效，并在必要时触发 retry / re-plan / fallback。
+
+当前已实现：
+
+1. Reflection 机制（执行后自检）
+每个 step 执行后进入验证流程
+不再仅依赖 tool_result.ok
+2. 空结果识别（Insufficient Detection）
+knowledge_search 返回 hits=[] 时：
+不直接结束任务
+触发下一步动作（retry）
+3. Retry / Re-plan 机制
+首轮检索失败 → 自动切换语义检索：
+knowledge_search → knowledge_semantic_search
+retry step 已纳入执行计划（plan）
+4. 多步执行链路打通
+
+当前系统已具备：
+
+User Input
+→ Plan (LLM / Rule-based)
+→ Execute Step1
+→ Verify
+→ Retry Step
+→ Verify
+→ Final Answer
+5. Debug 可观测性
+
+debug=true 时可以看到：
+
+plan
+step_results
+retry 行为
+每一步输出内容
+二、测试结果分析（关键验证）
+🧪 测试用例
+搜索 一个很奇怪的不存在内容abc999
+🔍 实际执行过程
+Step1：knowledge_search
+hits_total = 0
+判定：insufficient ✅
+行为：触发 retry
+Retry1：knowledge_semantic_search
+返回若干 hits（score ≈ 0.2~0.34）
+实际为弱相关内容（语义漂移）
+⚠️ 当前问题
+
+系统最终输出：
+
+任务已完成
+step1 成功
+retry1 成功
+
+❗ 问题本质
+
+当前系统存在关键缺陷：
+
+❌ 将“执行成功”误判为“答案成功”
+
+实际情况：
+
+维度	状态
+Tool Execution	✅ 成功
+Result Quality	❌ 不足
+Final Answer	❌ 错误（误报成功）
+三、当前 M4.3 状态评估
+✅ 已完成（Core）
+
+M4.3 核心执行能力已经具备：
+
+Reflection loop（执行后自检）
+空结果识别
+Retry 触发机制
+多步执行链路
+Debug 可观测性
+
+👉 结论：M4.3 Core = DONE
+
+⚠️ 未完成（Hardening）
+
+当前缺失的是：
+
+1. 结果质量判定不足
+未识别低分 semantic 命中（score≈0.3）
+未区分 weak / insufficient
+2. 缺少强关键词校验
+query 中的 abc999 未出现在任何结果中
+系统仍认为命中有效
+3. 无 fallback 策略
+retry 后仍不足
+未进入 fallback
+直接输出“任务完成”
+4. Final Answer 不符合用户语义
+
+当前输出是：
+
+内部执行日志 ❌
+而非用户可读答案 ❌
+
+👉 结论：M4.3 Hardening = IN PROGRESS
+
+四、下一步优化方向（已设计）
+🎯 引入 VerifyDecision 结构
+status: pass / weak / insufficient / fatal
+action: continue / retry / replan / fallback
+reasons: []
+score: optional
+🎯 增加 3 个核心判定规则
+1. Semantic Score Threshold
+top_score < 0.35 → insufficient
+0.35–0.5 → weak
+2. 强关键词覆盖检查
+query 中关键 token 未出现在 top-k
+→ 判定为 insufficient
+3. Retry 上限 + Fallback
+semantic retry 后仍不足
+→ 必须 fallback
+🎯 Final Answer 分层输出
+状态	输出策略
+pass	正常回答
+weak	保守回答
+insufficient	明确说明未找到
+fatal	系统失败说明
+五、M4.3 阶段性结论
+📌 当前真实进度
+模块	状态
+Reflection Loop	✅
+Retry / Re-plan	✅
+Verification（基础）	✅
+Verification（质量）	⚠️
+Fallback 策略	❌
+🧠 总结一句话
+
+M4.3 已完成“会反思”，但还没完成“反思正确”。
+
+六、Roadmap 更新
+当前进度
+M1 Runtime        ✅
+M2 Knowledge      ✅
+M2.5 Semantic     ✅
+M3 RAG            ✅
+M4.1 Planner      ✅
+M4.2 Multi-step   ✅
+M4.3 Reflection   ✅（Core）
+                 ⏳（Hardening）
+七、下一步计划
+🔜 M4.3 收尾（1–2 天）
+
+实现 verify_state 质量判定逻辑
+
+引入 score threshold
+
+引入 token 覆盖检查
+
+实现 fallback answer
+
+优化 final_answer 输出
+
+🔜 M4.4（预告）
+多策略 re-plan（不仅 retry tool）
+LLM-based verification（高级版本）
+多路径推理验证
+八、阶段评价
+
+当前系统已经从：
+
+❌ “工具调用引擎”
+
+进化为：
+
+✅ “具备自检能力的 Agent Runtime”
+
+🔥 关键里程碑
+
+M4.3 是整个 Agent 系统从“执行”走向“智能”的分水岭。
+
+
+---
+
+## 2026-04-05 开发记录：SOTA 检索链路重构 → Hybrid Retrieval 接入 → RAG 能力验证
+
+### 一、今日目标
+
+今天的核心目标不是继续堆功能，而是围绕当前 P4 Agent Sandbox 的知识检索与问答主链，做一轮更接近 SOTA 检索系统的结构性重构与验证，重点包括：
+
+1. 从“单一路径 semantic retrieval”升级为更合理的 **metadata-aware retrieval + hybrid retrieval**
+2. 让 query 能先经过 **route / rewrite**，再进入检索
+3. 让 RAG 不再只依赖 truncated snippet，而是尽可能使用 **full chunk text**
+4. 验证当前系统在不同类型问题上的表现，包括：
+   - 明确事实型问题
+   - 操作流程型问题
+   - 概念定义型问题
+   - 多阶段里程碑对比型问题
+
+---
+
+### 二、今天完成的核心重构
+
+---
+
+#### 1. metadata 路由能力正式接入主链
+
+今天已经把 metadata 相关能力真正接入到了执行链中，而不是只停留在上传阶段。
+
+当前检索 / RAG 工具已支持以下 metadata filter：
+
+- `domain`
+- `file_type`
+- `source`
+
+并且在执行阶段通过 `route_query()` 自动为知识类工具注入路由结果。
+
+#### 已实现的效果
+
+- 查询 `ROS2 机械臂抓取流程` 时，会自动路由到 `robotics`
+- 查询 `自动驾驶 planning 模块` 时，会自动路由到 `autonomous_driving`
+- 查询 `RAG 是什么`、`如何重建知识库` 等时，会路由到 `agent_system`
+
+#### 当前意义
+
+这一步意味着系统已经从“整个知识库无差别搜索”，升级为“先判断问题属于哪个知识域，再缩小检索范围”。
+
+这已经接近现代知识系统中常见的：
+
+- domain routing
+- metadata filter
+- retrieval scoping
+
+---
+
+#### 2. query rewrite 机制已经接入执行主链
+
+今天已经把 rewrite 能力加入到 orchestrator 的执行过程中。
+
+当前特点：
+
+- 对知识类 query，会在真正调用检索 / RAG 工具前进行 rewrite
+- 已支持把部分英文术语、问法补成更适合检索的形式
+- 审计日志里已经可以看到：
+  - `original_query`
+  - `rewritten_query`
+  - `rewrite_info`
+
+#### 当前状态
+
+目前 rewrite 还是偏规则型，但链路已经打通，后续可平滑升级为：
+
+- LLM rewrite
+- 多候选 rewrite
+- query decomposition
+
+#### 当前意义
+
+这一步很关键，因为它意味着系统不再是“拿用户原句直接硬搜”，而是开始具备 query understanding 的前置处理能力。
+
+---
+
+#### 3. `knowledge_search` 已从“文件级 summary 搜索”升级到“chunk 级全文检索”
+
+这是今天非常关键的一次升级。
+
+之前 `knowledge_search` 的全文能力实际上不够强，容易退化成：
+
+- 只在 summary 上找
+- 命中不稳定
+- 很难定位局部事实
+
+今天已经完成重构：
+
+#### 新能力
+
+- 支持 `mode="text"` 时直接在 **chunk 级文本** 上做 keyword / full-text 搜索
+- 每条命中结果带回：
+  - `chunk_id`
+  - `chunk_index`
+  - `section_title`
+  - `heading_level`
+  - `section_path`
+  - `start / end`
+  - metadata 字段
+
+#### 已验证的结果
+
+测试：
+
+```bash
+全文搜索 gripper
+已经可以直接命中：
+
+robotics_grasp_pipeline.md / chunk_0006
+robotics_grasp_pipeline.md / chunk_0011
+robotics_grasp_pipeline.md / chunk_0010
+
+并且能检出真正包含 gripper 的 chunk，而不是空结果后再 fallback。
+
+当前意义
+
+这一步意味着系统已经具备了真正可用的 chunk-level keyword retrieval，为后面的 Hybrid Retrieval 提供了 keyword 分支基础。
+
+4. Hybrid Retrieval 正式落地
+
+今天已经完成 app/core/hybrid_retrieval.py，并将其接入 RAG 主链。
+
+当前 Hybrid 结构
+keyword retrieval：knowledge_search(mode="text")
+semantic retrieval：knowledge_semantic_search
+fusion：RRF (Reciprocal Rank Fusion)
+当前流程
+question
+→ keyword retrieval
+→ semantic retrieval
+→ RRF fusion
+→ topK hits
+→ context builder
+→ LLM answer
+当前意义
+
+这标志着系统从：
+
+单路语义检索
+
+升级为：
+
+Hybrid Retrieval（keyword + semantic + fusion）
+
+这是一次非常重要的架构升级，已经明显向更现代的 RAG 系统靠近。
+
+5. RAG pipeline 已从 pure semantic 改为 hybrid retrieve
+
+今天已经修改 rag_pipeline.py：
+
+之前：
+
+run_rag_pipeline
+→ semantic_retrieve
+→ build_context
+→ LLM
+
+现在：
+
+run_rag_pipeline
+→ hybrid_retrieve
+→ build_context
+→ LLM
+
+也就是说，RAG 问答现在不是只依赖 embedding 相似度，而是依赖融合后的检索结果。
+
+当前意义
+
+这一步非常关键，因为很多事实型问题在纯 semantic 下容易漏掉，而 hybrid 对：
+
+精确术语
+ID / pulse / 参数
+短英文 token
+关键步骤名
+
+更友好。
+
+6. full chunk text 已成功回填到 RAG context
+
+这是今天最关键的实际效果之一。
+
+之前的失败案例里，RAG 命中了正确 chunk，但传给 LLM 的只是截断 snippet，例如：
+
+Gripper:
+- 200 = c
+
+导致模型虽然命中了相关 chunk，但拿不到完整事实，最终回答失败。
+
+今天修复后，full_context 中已经能看到完整内容：
+
+Gripper:
+- 200 = closed
+- 600 = open
+当前意义
+
+这一步说明：
+
+检索命中不再只是“看起来对”
+LLM 已经真正拿到了可回答问题的原始证据
+
+这也是今天最实质性的正确性提升。
+
+三、今天解决的关键问题 / Bug
+1. 修复 metadata / router 链路不生效问题
+
+今天确认并修复了 orchestrator 中“计算出 routed_args，但实际 tool_call 仍然传 resolved_args”的问题。
+
+修复后：
+
+step_results.output.domain
+filtered_file_count
+top hits 的 domain 分布
+
+都能体现 routing/filter 已真正生效。
+
+2. 修复 route/preview 接口不可用问题
+
+之前出现：
+
+Invalid HTTP request received
+Not Found
+路由文件循环 import
+
+今天已经定位并修复，/route/preview 可正常返回：
+
+domain
+strategy
+notes
+3. 修复 metadata.py 语法错误
+
+启动过程中曾因为 metadata.py 中存在非法字符 / 语法残留导致 uvicorn 无法启动，今天已排查并修复。
+
+4. 修复上传时报 sqlite3.OperationalError: no such table: files
+
+问题原因是数据库被手动清空后，启动后未重新正确初始化表结构。
+
+今天已通过 startup() / TaskStore.init() 重新恢复，上传接口重新可用。
+
+5. 修复 router.py 循环 import
+
+曾出现：
+
+ImportError: cannot import name 'route_query' from partially initialized module
+
+今天已定位为模块内部自引起的循环导入，后续已恢复正常。
+
+6. 修复 knowledge_rag_answer 插件加载失败
+
+今天最关键的一次故障定位。
+
+现象：
+
+boot 日志看起来插件系统正常
+但实际执行时报：
+'knowledge_rag_answer'
+tool handler not found: knowledge_rag_answer
+
+通过对 ToolRegistry 和 SafeToolExecutor 加 debug 后确认：
+
+registry 本身没问题
+真正原因是：
+knowledge_rag_answer 所依赖的 hybrid_retrieval.py 有语法错误
+导致插件加载失败
+policy 允许该 tool，但 registry 实际没有注册成功
+
+根因最终锁定为：
+
+from __future__ import annotations
+
+没有放在文件最前面。
+
+修复后：
+
+failed plugins = []
+knowledge_rag_answer 成功注册
+RAG 主链恢复可用
+当前意义
+
+这次排查很有价值，因为它验证了：
+
+boot report
+registry state
+executor call
+plugin import failure
+
+之间的完整关系，整个运行时排障能力更清晰了。
+
+四、今天完成的关键测试结果
+测试 1：全文搜索 gripper
+结果：成功
+
+输出已经变成真正的全文 chunk 检索结果，而不是空结果 + semantic retry。
+
+命中内容包括：
+
+grasp_node
+Servo Control
+Step 4: Motion Execution
+说明
+knowledge_search(mode="text") 已真正可用
+keyword branch 已落地成功
+测试 2：知识问答 gripper 打开和关闭的脉冲值是多少
+结果：成功
+
+最终回答：
+
+打开：600
+关闭：200
+说明
+
+这是今天最重要的 RAG 成功样例，证明：
+
+hybrid retrieval 已接入
+full chunk text 已进入 context
+LLM 已能基于证据稳定回答
+
+这条测试是今天最重要的正向结果。
+
+测试 3：知识问答 如何重建知识库
+结果：成功
+
+最终正确输出了 5 个步骤：
+
+上传文档
+构建知识索引
+构建文本块
+构建知识向量
+知识问答验证
+说明
+
+这说明 Hybrid Retrieval 不只适合参数型问题，对流程型问题也已经明显优于原先 pure semantic 版本。
+
+测试 4：知识问答 RAG 是什么
+结果：成功
+
+输出内容正确，且说明 hybrid 引入后并没有破坏原本已经稳定的概念型问答。
+
+说明
+
+这意味着系统现在在三类问题上都已经出现正向结果：
+
+明确事实型
+流程型
+概念型
+测试 5：知识问答 M1 M2 M3 M4的区别是什么
+结果：未通过
+
+当前输出仍为：
+
+命中了 M1 / M2 / M2.5 / M3
+但最终仍回答“未在知识库中找到明确答案”
+当前判断
+
+这并不是检索完全失败，而是：
+
+M4 没有稳定进入 top context
+即便拿到了 M1/M2/M3 chunk，context 仍偏碎片化
+当前 context builder 只是简单拼接 topK，缺少：
+section grouping
+邻近 chunk 合并
+对同一文档里连续 section 的组织
+verifier 对这类“多段对比型问题”还比较保守
+说明
+
+这条测试非常有价值，因为它准确暴露出当前系统下一阶段的瓶颈已经不是“能不能搜到”，而是：
+
+“能不能把多段证据组织成适合回答对比问题的上下文”
+
+这正是下一阶段应该进入的方向。
+
+五、截至今天的系统能力判断
+已经明显稳定的能力
+Chunk-level keyword retrieval
+Semantic retrieval + rerank
+Metadata-aware routing/filter
+Hybrid Retrieval（keyword + semantic + RRF）
+RAG with full evidence context
+对明确事实 / 流程 / 概念问题的可用问答
+仍然不足的能力
+Multi-section comparison
+例如：M1 / M2 / M3 / M4 区别
+Context Builder 还偏初级
+仍是 topK 拼接
+Section / title boost 还可以继续强化
+RAG verifier 还不能很好处理“部分可答、部分缺失”的问题
+Rewrite 目前主要还是 rule-based，不够通用
+Hybrid Retrieval 虽已接入，但还未加更细的 chunk/section 合并策略
+六、今天阶段性结论
+
+今天这轮开发的意义非常明确：
+
+不是简单修 Bug，而是把系统从一个“能跑的基础 RAG”推进到了一个开始具备现代检索系统形态的 Agent Knowledge Runtime。
+
+从 SOTA 视角看，今天已经完成了以下关键跃迁：
+
+原来：
+单一路径 semantic retrieval
++ topK snippet 拼接
++ 命中不稳定
+
+现在：
+route / metadata filter
++ query rewrite
++ chunk-level keyword retrieval
++ semantic retrieval
++ RRF hybrid fusion
++ full chunk context
++ RAG answer
+
+也就是说，今天的系统已经明显从：
+
+❌ “基础检索问答 demo”
+
+进化到了：
+
+✅ “具备 SOTA 检索链路雏形的本地 Agent Runtime”
+
+七、当前阶段判断
+当前里程碑状态
+M1 Runtime Foundation：✅
+M2 Knowledge Runtime：✅
+M2.5 Semantic Retrieval：✅
+M3 RAG Runtime：✅
+M4.1 Planner：✅
+M4.2 Multi-step：✅
+M4.3 Reflection / Verification（Core）：✅
+M4.3 Hardening：🟡 持续中
+今天对 M3 / M4 的实际推进
+
+今天虽然主要在检索链路上工作，但本质上是在给 M3 RAG Runtime 做一次质量跃迁，同时也为 M4 智能化执行 打基础。
+
+因为：
+
+更好的 retrieval → 更好的 answer quality
+更清晰的 routing / rewrite → 更好的 planner/tool use
+更强的 evidence context → 更合理的 verifier
+八、下一步建议
+
+明天或下一阶段应优先推进：
+
+1. Context Builder 升级
+
+目标：
+
+相邻 chunk 合并
+同 section / 同文档聚合
+避免 topK 碎片化
+2. Section / title boost 强化
+
+目标：
+
+“如何重建知识库”这类问题更稳定地命中 playbook section
+“M1 M2 M3 M4区别”这类问题更稳定地命中 roadmap sections
+3. Multi-section question 支持
+
+目标：
+
+支持对比型问题
+支持汇总型问题
+支持“多个阶段 / 多个模块差异”类问答
+4. verifier 升级
+
+目标：
+
+区分“部分可答”与“完全不可答”
+不要把“已有 80% 正确证据”的回答一律打成失败
+5. 后续再考虑 LLM-based rewrite / decomposition
+
+在 rule-based rewrite 先稳定后，再做更强 query understanding。
+
+九、今天一句话总结
+
+今天完成的不是一次小修，而是把 P4 Agent Sandbox 的知识检索主链，正式从“单路语义检索”升级到了“带 routing / rewrite / metadata filter / hybrid retrieval / full-context RAG”的新阶段。
+
+其中最关键的正向验证是：
+
+gripper 打开和关闭的脉冲值是多少：✅ 成功
+如何重建知识库：✅ 成功
+RAG 是什么：✅ 成功
+M1 M2 M3 M4的区别是什么：❌ 暂未解决，但已准确暴露下一阶段瓶颈为 context builder 与 multi-section synthesis
+
+# Dev Log
+## 2026-04-11 — M4.5 Context Builder 完成记录
+
+### 今日目标
+完成 M4.5 Context Builder 的可用版本，使 RAG 不再只是“检索到什么就直接拼什么”，而是能够：
+
+- 对召回候选进行上下文级重排
+- 过滤明显噪声块
+- 根据问题类型组织更合理的证据顺序
+- 提升复杂问题、区别题、关系题的回答稳定性
+
+---
+
+## 一、今天完成的核心改动
+
+### 1. 引入独立的 Context Builder 模块
+已在 `app/core/context_builder.py` 中实现上下文构建逻辑，并在 `rag_pipeline.py` 中接入调用。
+
+当前主链路变为：
+
+```text
+Hybrid Retrieval
+→ Context Builder
+→ Prompt Assembly
+→ LLM Answer
+
+不再采用简单的“topK chunk 直接拼接”方式。
+
+2. 实现显式 Context Rerank
+
+在 Context Builder 中新增显式上下文分数 context_score。
+
+当前区分两类分数：
+
+score：原始 retrieval 分数
+context_score：进入 prompt 前的上下文排序分数
+
+这意味着系统已经具备两层判断：
+
+这一块和 query 是否相似
+这一块是否更值得进入 prompt、是否应该排前面
+
+这是从“纯检索”迈向“检索 + 重排”的关键一步。
+
+3. 实现 query-aware 排序
+
+Context Builder 已可根据问题类型做 section-aware 排序。
+
+当前已支持的粗分类包括：
+
+process（流程类）
+architecture（架构类）
+compare（区别 / 对比类）
+relation（关系类）
+general（普通问题）
+
+并根据问题类型对不同 section 进行加权，例如：
+
+System Architecture
+Overview
+Step x
+*_node
+
+从而提升“区别题 / 关系题 / 流程题”的上下文组织质量。
+
+4. 实现噪声过滤
+
+已加入噪声块过滤逻辑，当前会过滤或降权以下类型内容：
+
+Keywords
+Failure
+Error
+Common Issues
+Improve ...
+过短、无实质信息的块
+
+效果：减少 prompt 污染，节省上下文预算，降低 LLM 被弱相关内容带偏的概率。
+
+5. 扩大 RAG 候选召回规模
+
+将 RAG 调用时的 top_k 从 5 提升到 10。
+
+这个改动非常关键，因为 Context Builder 只有在“关键 chunk 被召回”的前提下，才能进行有效重排。
+
+实践证明：
+
+当 top_k=5 时，一些关键块（如 System Architecture）可能根本进不了候选
+当 top_k=10 后，Context Builder 才能把关键块提升到 prompt 前列
+二、今天验证通过的能力
+Case 1：区别题
+
+测试问题：
+
+知识问答 机械臂抓取流程和系统架构有什么区别？
+之前的问题
+System Architecture 虽然可能在召回集合里，但原始分数较低
+prompt 中常混入 Failure / Error / Improve 等噪声块
+最终答案能答对，但更依赖 LLM 的抽象能力，证据支撑不够扎实
+现在的表现
+
+在 full_context 中可明确看到：
+
+System Architecture 被提升到第 1 位
+Step 1 / Step 2 被保留
+Failure / Error / Improve 相关内容被过滤掉
+输出中显示 context_score，证明显式 rerank 已生效
+
+示例结果特征：
+
+[1] System Architecture
+score=0.043895
+context_score=0.893895
+
+这说明系统已经不再按原始检索顺序拼接，而是在进入 prompt 前进行了重排。
+
+结论
+
+区别题从“表面能答”提升到了“有结构化证据支撑地回答”。
+
+Case 2：关系题
+
+测试问题：
+
+知识问答 ROS2 机械臂抓取流程里，world model 和 IK 的关系是什么？
+当前上下文组织
+
+full_context 前列已经稳定出现：
+
+System Architecture
+ik_solver_node
+world_model_node
+Step 2: Coordinate Transformation
+Overview
+Step 3: Inverse Kinematics
+这说明
+
+系统已经可以自动组织出一条较完整的证据链：
+
+整体关系：System Architecture
+节点职责：world_model_node + ik_solver_node
+流程补充：Step 2 + Step 3
+最终答案
+
+回答能够明确说明：
+
+World Model 负责像素坐标到世界坐标转换
+IK 负责根据目标位姿求解关节角 / 脉冲
+前者是后者的重要输入
+结论
+
+关系题的证据结构和答案质量都达到较好水平。
