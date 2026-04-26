@@ -91,11 +91,11 @@ def _load_file_meta(sandbox_root: Path, file_id: str) -> Dict[str, Any]:
 
 def _meta_match(
     meta: Dict[str, Any],
-    domain: str | None,
+    domains: List[str] | None,
     file_type: str | None,
     source: str | None,
 ) -> bool:
-    if domain is not None and str(meta.get("domain")) != str(domain):
+    if domains is not None and str(meta.get("domain")) not in domains:
         return False
     if file_type is not None and str(meta.get("file_type")) != str(file_type):
         return False
@@ -110,7 +110,7 @@ def _build_summary_hits(
     knowledge_dir: Path,
     query: str,
     limit: int,
-    domain: str | None,
+    domains: List[str] | None,
     file_type: str | None,
     source: str | None,
 ) -> Dict[str, Any]:
@@ -132,7 +132,7 @@ def _build_summary_hits(
         source_chars = int(rec.get("source_chars") or 0)
 
         meta = _load_file_meta(sandbox_root, file_id=file_id)
-        if not _meta_match(meta, domain=domain, file_type=file_type, source=source):
+        if not _meta_match(meta, domains=domains, file_type=file_type, source=source):
             continue
 
         filtered_file_ids.add(file_id)
@@ -179,7 +179,7 @@ def _build_text_hits(
     chunks_dir: Path,
     query: str,
     limit: int,
-    domain: str | None,
+    domains: List[str] | None,
     file_type: str | None,
     source: str | None,
 ) -> Dict[str, Any]:
@@ -200,7 +200,7 @@ def _build_text_hits(
         chunks = rec.get("chunks", []) or []
 
         meta = _load_file_meta(sandbox_root, file_id=file_id)
-        if not _meta_match(meta, domain=domain, file_type=file_type, source=source):
+        if not _meta_match(meta, domains=domains, file_type=file_type, source=source):
             continue
 
         filtered_file_ids.add(file_id)
@@ -250,12 +250,15 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
     limit = int(args.get("limit", 10))
     mode = _normalize(str(args.get("mode", "summary"))).lower()  # summary | text
 
-    domain = args.get("domain")
+    domains = args.get("domains")
+    if domains is not None:
+        domains = [str(d).strip() for d in domains if str(d).strip()]
+        if not domains:
+            domains = None
+
     file_type = args.get("file_type")
     source = args.get("source")
 
-    if domain is not None:
-        domain = _normalize(str(domain)) or None
     if file_type is not None:
         file_type = _normalize(str(file_type)) or None
     if source is not None:
@@ -280,7 +283,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
                 "query": query,
                 "mode": mode,
                 "limit": limit,
-                "domain": domain,
+                "domains": domains,
                 "file_type": file_type,
                 "source": source,
                 "hits": [],
@@ -292,7 +295,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             knowledge_dir=knowledge_dir,
             query=query,
             limit=limit,
-            domain=domain,
+            domains=domains,
             file_type=file_type,
             source=source,
         )
@@ -304,7 +307,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
                 "query": query,
                 "mode": mode,
                 "limit": limit,
-                "domain": domain,
+                "domains": domains,
                 "file_type": file_type,
                 "source": source,
                 "hits": [],
@@ -316,7 +319,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             chunks_dir=chunks_dir,
             query=query,
             limit=limit,
-            domain=domain,
+            domains=domains,
             file_type=file_type,
             source=source,
         )
@@ -326,7 +329,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         "query": query,
         "mode": mode,
         "limit": limit,
-        "domain": domain,
+        "domains": domains,
         "file_type": file_type,
         "source": source,
         "hits": out["hits"],
@@ -346,7 +349,10 @@ TOOL = ToolSpec(
             "query": {"type": "string"},
             "mode": {"type": "string", "enum": ["summary", "text"]},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-            "domain": {"type": ["string", "null"]},
+            "domains": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+            },
             "file_type": {"type": ["string", "null"]},
             "source": {"type": ["string", "null"]},
         },

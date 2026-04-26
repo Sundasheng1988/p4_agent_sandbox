@@ -189,19 +189,6 @@ M3 RAG Runtime ✅ (基本完成)
 
 ---
 
-### 下一阶段
-
-
-M4 Agent Intelligence
-
-
-计划能力：
-
-- Planning
-- Multi-step Tool Use
-- Memory
-- Tool reasoning
-
 # 2026-03-16
 
 完成 M3 RAG Runtime
@@ -962,37 +949,6 @@ M4.1 Planner      ✅
 M4.2 Multi-step   ✅
 M4.3 Reflection   ✅（Core）
                  ⏳（Hardening）
-七、下一步计划
-🔜 M4.3 收尾（1–2 天）
-
-实现 verify_state 质量判定逻辑
-
-引入 score threshold
-
-引入 token 覆盖检查
-
-实现 fallback answer
-
-优化 final_answer 输出
-
-🔜 M4.4（预告）
-多策略 re-plan（不仅 retry tool）
-LLM-based verification（高级版本）
-多路径推理验证
-八、阶段评价
-
-当前系统已经从：
-
-❌ “工具调用引擎”
-
-进化为：
-
-✅ “具备自检能力的 Agent Runtime”
-
-🔥 关键里程碑
-
-M4.3 是整个 Agent 系统从“执行”走向“智能”的分水岭。
-
 
 ---
 
@@ -1630,3 +1586,1119 @@ IK 负责根据目标位姿求解关节角 / 脉冲
 结论
 
 关系题的证据结构和答案质量都达到较好水平。
+
+
+新功能！
+点击以编辑
+📅 Dev Log — 2026-04-12
+🧭 今日目标
+打通 Multi-domain RAG 全链路
+统一 domain → domains 参数体系
+实现 Planner → RAG → Retrieval 的端到端运行验证
+从“代码完成”推进到“真实运行成功”
+✅ 今日完成
+1️⃣ RAG Pipeline 完整升级（核心里程碑）
+
+✅ run_rag_pipeline 支持：
+
+domains: list[str]
+file_type: str | None
+source: str | None
+
+✅ retrieval 调用统一为：
+
+hybrid_retrieve(..., domains=domains)
+✅ 输出结构统一：
+domains
+hits
+context
+answer
+
+👉 结论：
+RAG 主链已完成 multi-domain 改造（代码层完成）
+
+2️⃣ Hybrid Retrieval 架构升级（关键突破）
+✅ 引入 RRF 融合（Reciprocal Rank Fusion）
+Keyword + Semantic 双路融合
+✅ 支持 metadata filter：
+domains
+file_type
+source
+✅ 增加字段：
+from_keyword
+from_semantic
+rrf_score
+✅ 自动补全：
+full_text
+
+👉 当前能力：
+
+Hybrid Retrieval = Keyword + Semantic + RRF Fusion
+
+👉 意义：
+已经脱离“简单向量检索”，进入工业级 RAG 检索架构
+
+3️⃣ Semantic Retrieval 对齐
+✅ 支持 domains 过滤
+✅ metadata fallback（index → meta.json）
+✅ 向量检索结构统一
+✅ 输出标准化（score / snippet / full_text）
+4️⃣ Knowledge Tool 层改造（关键中间层）
+
+涉及：
+
+knowledge_search
+knowledge_semantic_search
+
+已完成：
+
+domain → domains
+_meta_match → 支持 list 过滤
+
+👉 状态：
+✅ 基本完成（已接入 hybrid）
+
+5️⃣ Multi-domain RAG 主链打通（🚀重大里程碑）
+✔ 实际运行验证（关键）
+
+执行：
+
+知识问答 端到端自动驾驶系统的核心模块是什么
+
+输出：
+
+status: done
+step0 ok: True
+domains: ['autonomous_driving']
+hits_total: 10
+✔ 关键验证点全部通过
+✅ Planner 正确识别 domain
+
+✅ Router 成功路由到：
+
+autonomous_driving
+✅ RAG pipeline 正常执行
+✅ hybrid retrieval 返回结果
+✅ context builder 正常拼接
+✅ LLM 成功生成答案
+🎯 今日最重要结论
+Multi-domain RAG 主链：已从“设计完成” → “真实运行成功”
+
+这是一次系统级质变。
+
+❗ 今日核心问题（已解决）
+🚨 问题
+run_rag_pipeline() got an unexpected keyword argument 'domains'
+🎯 根因
+
+👉 运行环境加载了旧版本代码
+
+原因包括：
+
+uvicorn 未重启
+pycache 未清
+import 指向旧模块
+✅ 解决方式
+清理缓存
+强制重启服务
+验证函数 signature
+
+👉 结论：
+这是运行态问题，不是架构问题
+
+⚠️ 新暴露问题（非常关键）
+❗ Retrieval 质量问题（进入新阶段）
+
+虽然系统已通，但出现：
+
+1. Top Hits 不精准
+
+当前命中内容：
+
+数据标注
+虚拟图
+泛描述段落
+
+❌ 没有直接命中：
+
+“系统架构”
+“核心模块定义”
+2. Answer 仍带“模型补全”
+
+当前答案包含：
+
+感知模块
+高精地图
+
+👉 但这些并非来自明确结构化证据块
+
+3. 结论
+系统问题已从“能不能跑”
+升级为
+“跑得准不准”
+🧠 当前系统能力评估
+已完成能力
+模块	状态
+Multi-domain Routing	✅
+Hybrid Retrieval	✅
+RRF Fusion	✅
+Metadata Filter	✅
+Context Builder	✅
+Answer Generation	✅
+当前短板
+模块	状态
+Retrieval Ranking	⚠️
+Query Rewrite	⚠️
+Rerank	❌
+Context 精排	⚠️
+📊 当前能力等级
+M3：已完成（RAG Runtime）
+M4.3：已完成（Multi-domain Retrieval）
+M4.4：未完成（Rerank + 精排）
+🚀 下一步计划
+🔥 P0（必须做）
+1. Retrieval 精度优化
+引入关键词权重：
+“核心模块”
+“系统组成”
+“架构”
+降权：
+示例
+数据说明
+工程细节段落
+2. Query Rewrite
+
+例如：
+
+原问题：
+端到端自动驾驶系统的核心模块是什么
+
+改写为：
+自动驾驶系统 核心模块 架构 组成
+⭐ P1（系统质变）
+3. 引入 Rerank（M4.4）
+Cross-encoder rerank
+或 LLM rerank
+
+👉 这是下一阶段最关键能力
+
+4. Context Builder 升级
+chunk merge
+section-aware
+token budget 控制
+5. Retrieval Debug 能力
+输出：
+why this hit
+why filtered
+rerank score
+🧩 今日关键突破总结
+🔥 最大突破
+从：
+单 domain + 单检索
+
+到：
+Multi-domain + Hybrid + RRF + Structured Context
+🧠 本质变化
+
+你今天完成的不是“一个功能”，而是：
+
+从 Demo RAG → Production RAG 的跃迁
+📌 明日建议
+
+直接进入：
+
+👉 M4.4 阶段
+rerank
+retrieval quality control
+answer grounding
+🧠 一句话总结
+今天，你的系统第一次真正具备了“可扩展的知识系统能力”
+但还不具备“稳定高质量回答能力”
+
+# 2026-04-18
+---
+
+# 🧩 DEV LOG — M0 阶段（Workflow + Skill 闭环）
+
+## 📅 时间范围
+2026-04（Milestone M0 阶段）
+
+---
+
+# 🎯 本阶段目标
+
+实现：
+
+- 从 “RAG 问答系统” → “可执行任务的 Agent”
+- 支持：
+  - Skill 触发
+  - Workflow 执行
+  - Markdown 交付物输出
+
+---
+
+# ✅ 已完成能力（本阶段新增）
+
+## 1. Skill System v1（已完成）
+
+### 能力
+- 支持通过 query 匹配 skill
+- 支持 workflow_name 绑定
+- 支持结构化 workflow 定义
+
+### 当前实现
+- 静态 skill registry
+- 手写 skill spec
+- 支持 summarize_project_status
+
+---
+
+## 2. Workflow Runtime v1（已完成）
+
+### 能力
+- 多 step 顺序执行
+- step 状态跟踪（ok / error）
+- step output 传递
+
+### 当前实现
+- `workflow_runtime.py`
+- 支持：
+  - collect_inputs
+  - rag_analyze
+  - generate_report
+
+---
+
+## 3. Task Type Detection v1（已完成）
+
+### 能力
+- 区分：
+  - 普通 Q&A
+  - workflow 任务
+
+### 当前逻辑
+- 基于规则判断（关键词 / 结构）
+
+---
+
+## 4. Artifact Generation v1（已完成）
+
+### 能力
+- 输出 Markdown 文件
+- 支持结构化报告
+
+### 当前实现
+- summarize_project_status 输出：
+  - 当前阶段
+  - 已完成能力
+  - 风险
+  - 下一步
+
+---
+
+## 5. RAG + Workflow 融合（已完成）
+
+### 能力
+- Q&A → 走 RAG
+- Task → 走 Workflow
+
+### 当前状态
+- 主链路已打通
+- Skill 可触发 workflow
+
+---
+
+# ⚠️ 当前问题（关键）
+
+## 1. Workflow 未绑定真实输入（严重）
+
+### 表现
+- collect_inputs 只返回 expected_inputs
+- 未真正读取：
+  - roadmap
+  - dev log
+  - trace
+
+### 结果
+- 后续 step 使用空 context
+- LLM 进行“脑补”
+
+---
+
+## 2. Hallucination（高风险）
+
+### 表现
+- 输出：
+  - “开发中期阶段”
+  - “系统按计划推进”
+  - “接口需要优化”
+
+### 问题
+- 上述内容未出现在输入材料中
+
+---
+
+## 3. RAG 未命中但仍生成
+
+### 表现
+- hits = []
+- context = ""
+
+但仍输出完整报告
+
+---
+
+## 4. roadmap / dev log 未区分语义
+
+### 问题
+- roadmap = 计划
+- dev log = 事实
+
+当前系统未区分
+
+---
+
+# 🔧 当前开发重点（M0核心）
+
+## 1. Workflow Input Binding（最高优先级）
+
+必须实现：
+
+- collect_inputs：
+  - 真正读取文件
+  - 返回 materials
+
+- 构建：
+  - materials_context
+
+---
+
+## 2. Step Grounding
+
+每个 step 必须：
+
+- 仅基于 context 分析
+- 不允许无依据生成
+
+---
+
+## 3. Artifact 可信性
+
+输出必须：
+
+- 可追溯到输入材料
+- 不允许泛化总结
+- 不允许“行业模板话”
+
+---
+
+# 🚧 当前进行中
+
+- Workflow Input Binding v1
+- Context Grounding
+- Step → context 传递机制优化
+
+---
+
+# 📌 下一步计划
+
+## 短期（M0完成前）
+
+1. 实现：
+   - collect_inputs → 真实材料读取
+2. 改造：
+   - rag_analyze → material_analyze
+3. 限制：
+   - 无证据 → 明确输出“材料中未体现”
+
+---
+
+## 中期（M0之后）
+
+- Memory v1
+- Skill 自动生成
+- Query Understanding（LLM版本）
+- Quality Harness
+
+---
+
+# 📊 当前阶段判断（基于事实）
+
+- 系统已从：
+  - “RAG QA系统”
+  →
+  - “初步 Workflow Agent”
+
+- 当前卡点：
+  - ❗ 不在能力
+  - ❗ 在 Grounding（证据绑定）
+
+---
+
+# 🧠 关键认知
+
+当前系统状态：
+
+> ✅ 已具备执行能力  
+> ❌ 尚未具备“可信执行能力”
+
+---
+
+# 🧪 测试说明（用于 Agent）
+
+本 dev log 用于：
+
+- summarize_project_status workflow 测试
+- 验证：
+  - 是否基于材料输出
+  - 是否避免 hallucination
+
+---
+
+# 2026-04-21
+
+M0 当前测试总结
+一、目前 M0 已经完成的模块和功能
+
+从现在的代码、chunk 结果、/agent/run 测试表现来看，M0 不是没做成，而是已经完成了主体框架，并进入 grounded 收尾阶段。
+
+1. 基础知识库链路已经打通
+
+已经具备：
+
+文件上传
+文件元数据保存
+chunk 构建
+embedding 构建
+hybrid retrieval
+RAG 问答输出
+
+这说明最基础的“文件 → chunk → 向量 → 检索 → 回答”主链路已经是通的。
+
+2. /agent/run 已经能执行 M0 的主入口
+
+你现在已经明确：
+
+M0 阶段先走 /agent/run
+不先改 /task/run
+
+这意味着当前系统已经具备：
+
+task route
+QA 模式
+skill / workflow 模式
+基本的 agent 入口调度能力
+3. Workflow / Skill 框架已经有雏形
+
+从之前的 summarize_project_status 测试和后续代码修改看，已经实现或部分实现了：
+
+workflow runtime
+collect inputs
+material analyze
+markdown artifact 输出
+
+也就是说，系统已经不只是“问答 demo”，而是开始具备：
+
+基于材料执行任务并生成交付物
+
+这正是 M0 的核心方向。
+
+4. chunk metadata 扩展已经开始生效
+
+你现在看到的 chunk 已经带上了这些字段：
+
+filename
+domain
+file_type
+doc_role
+created_at
+created_at_iso
+created_date
+section_title
+section_date
+people
+action_items
+due_dates
+
+这一点非常重要，因为它意味着系统已经不再只是“纯文本块检索”，而是开始向：
+
+结构化、可过滤、可约束的检索
+
+靠近。
+
+5. 日期类信息已经能进入 chunk
+
+你刚刚验证出来：
+
+created_at_iso 有值
+created_date 有值
+section_date 也有值
+doc_role=dev_log
+
+说明你这次对未来“会议纪要 / 行动项 / 责任人 / 时间定位”做的铺垫是对的，这一步不是白做，而是很关键。
+
+二、这轮测试发现的主要问题
+
+现在的问题不是“系统完全不能用”，而是：
+
+能命中、能回答，但还不够严格 grounded。
+
+这轮测试暴露出的问题主要有 5 类。
+
+问题 1：用户限定条件还没有真正变成硬过滤
+
+比如你问：
+
+只根据 dev_log_m0_test.md
+只根据 roadmap_m0_test.md
+只根据 2026-03-15
+只根据 当前核心问题
+
+系统虽然“看懂了这句话的大意”，但实际上还没有把这些条件真正下沉成检索过滤条件。
+
+表现就是：
+
+hits 里仍混入其他文件
+roadmap 问题会串到 dev log
+指定日期时，也会混入别的日期 chunk
+
+这说明：
+
+文件约束、section 约束、日期约束，目前还是“弱语义提示”，不是“强过滤条件”。
+
+问题 2：检索排序仍然容易被高频关键词带偏
+
+例如问：
+
+只根据 roadmap_m0_test.md 中 当前核心问题 回答：现在最大问题是什么
+
+系统却优先召回了 dev log 中关于 “问题”“当前”“系统” 的 chunk。
+
+这说明现在检索排序仍然有明显缺陷：
+
+query 中通用词权重过高
+文件名约束权重不够
+section 标题命中权重不够
+exact match 和 metadata match 还没有压过语义相似噪声
+问题 3：roadmap / dev log 的语义角色还没有真正区分开
+
+这点其实你材料里自己也写出来了：
+
+roadmap = 计划
+dev log = 事实
+
+但当前系统还没有在检索层和回答层真正落实这一点。
+
+所以出现了：
+
+问 roadmap 的“当前核心问题”，答成 dev log 的“关键认知”
+用计划材料时混入事实材料
+用事实材料时混入阶段总结材料
+
+这会直接影响 grounded 质量。
+
+问题 4：答案有时对，但过程不干净
+
+比如：
+
+只根据 dev_log_m0_test.md 中 2026-03-15 的内容回答：M3 的目标是什么
+
+最终答案是对的：
+
+M3 的目标是让系统能够用知识库回答问题。
+
+但 hits 里前几条并不干净，前面混进了：
+
+2026-03-23
+2026-03-29
+roadmap 相关内容
+
+说明现在是：
+
+答案可能答对
+但证据链不够纯
+
+而 M0 要求的不是“碰巧答对”，而是：
+
+基于正确材料、按正确约束、输出可信答案。
+
+问题 5：QA 已经能利用 chunk metadata，但还没有“显式使用 metadata filter”
+
+你现在的 chunk 里 metadata 已经有了，这是好事。
+但从测试现象看，检索层还没有真的做到：
+
+filename = xxx
+section_date = yyyy-mm-dd
+doc_role = roadmap/dev_log
+section_title = xxx
+
+这种显式过滤。
+
+也就是说：
+
+metadata 已经准备好了，但 retrieval 还没有把它们真正用起来。
+
+三、当前 M0 到底完成到什么程度
+
+我给你一个尽量准确的判断：
+
+M0 已完成的部分
+Agent 入口已具备
+QA / workflow 基础分流已具备
+文件上传与知识库重建已具备
+chunk / embedding / hybrid retrieval 已具备
+artifact 输出已具备
+chunk metadata 扩展已启动
+基本 grounded workflow 雏形已形成
+M0 尚未完成的关键部分
+文件级 hard filter
+日期级 hard filter
+section 级 hard filter
+roadmap / dev log 的角色分离
+“只根据……”约束的严格执行
+grounded answer 的强校验
+
+所以更准确地说：
+
+M0 主体已完成，当前卡在最后的 Grounding 收尾。
+
+四、后续对策
+
+你现在后续不要再大范围发散，重点就盯住一件事：
+
+把用户问题中的“限定条件”结构化，并真正下沉到检索层。
+
+对策 1：做 Query Constraint Extraction
+
+把这类表达解析出来：
+
+只根据 xxx.md
+2026-03-15
+当前核心问题
+roadmap
+dev log
+
+变成结构化约束，例如：
+
+filename = dev_log_m0_test.md
+doc_role = dev_log
+section_date = 2026-03-15
+section_title = 当前核心问题
+对策 2：检索层接 metadata filter
+
+在 retrieval 阶段支持：
+
+filename filter
+doc_role filter
+created_date filter
+section_date filter
+section_title / section_path filter
+
+并且这些 filter 应优先于纯语义相似度。
+
+对策 3：回答前做 grounded check
+
+如果用户说：
+
+只根据 roadmap_m0_test.md
+
+那最终上下文中如果混入 dev log，就应该：
+
+直接过滤掉
+或明确返回“当前命中文本不满足限定条件”
+
+而不是继续生成答案。
+
+对策 4：强化 rerank 规则
+
+后续 rerank 至少要增加这些加权：
+
+文件名完全命中强加权
+section_title 完全命中强加权
+section_date 命中强加权
+doc_role 一致性加权
+违反约束的 chunk 降权或剔除
+对策 5：把 roadmap / dev log / meeting notes 做角色化
+
+未来你还要接会议纪要、任务描述、责任人、日期、行动项。
+所以现在就要把文档角色定清楚：
+
+roadmap = 计划
+dev_log = 实际进展
+trace = 执行记录
+meeting_notes = 会议纪要
+task_desc = 任务说明
+
+这样未来才能支持：
+
+按日期问
+按责任人问
+按行动项问
+按阶段问
+按计划 vs 实际差异问
+五、接下来具体要改什么
+
+按优先级我建议是下面这几块。
+
+第一优先级
+query_understanding.py
+router.py
+rag_pipeline.py 或实际检索入口
+hybrid_retrieval.py
+
+目标：
+
+先把 query 中的约束识别出来
+再把这些约束传给检索层
+第二优先级
+knowledge_search / knowledge_semantic_search / 你真正读 chunk_index 的地方
+rerank 逻辑所在文件
+
+目标：
+
+让 metadata 真正参与检索与排序
+第三优先级
+/agent/run 对应的 route 和执行入口
+grounded answer / verifier 逻辑
+
+目标：
+
+回答前检查是否真的满足“只根据xxx”的条件
+六、现在最准确的一句话总结
+
+M0 的主框架已经搭起来了，当前不是缺功能，而是缺最后一层“按限定条件严格取证”的能力。
+
+所以你现在的重点不是继续加新功能，而是：
+
+把文件名、日期、section、文档角色这些 metadata 真正用进 retrieval 和 grounding。
+
+
+# 2026-04-25 ～ 2026-04-26
+
+## M0 Grounded Workflow 收尾：从 LLM 总结改为 Facts → Rewrite → Artifact
+
+### 今日核心目标
+
+本阶段目标是继续完善 M0 的 grounded workflow，使 `summarize_project_status` 不再依赖 LLM 直接读全文自由总结，而是改为：
+
+```text
+collect_materials
+↓
+extract_project_facts（规则事实抽取）
+↓
+rewrite_summary_from_facts（LLM 只做表达整理）
+↓
+generate_markdown_from_facts
+
+## 一、完成的核心改造
+
+### 1. Workflow 结构重构
+summarize_project_status workflow 已从多段 material_analyze 改为三步结构：
+collect_inputs
+extract_facts
+generate_report
+后续又增加：
+
+rewrite_summary
+
+最终结构为：
+
+collect_inputs
+↓
+extract_facts
+↓
+rewrite_summary
+↓
+generate_report
+
+### 2. 新增规则事实抽取层
+
+新增函数：
+
+_extract_project_facts_from_materials()
+
+用于从 materials_context 中抽取结构化事实，输出：
+
+{
+    "current_stage": [],
+    "completed": [],
+    "in_progress": [],
+    "problems": [],
+    "next_steps": [],
+}
+
+这一步不调用 LLM，只做规则抽取，目的是保证事实来源可控。
+
+### 3. 新增 Markdown from Facts 输出
+
+新增：
+
+_render_project_status_markdown_from_facts()
+_step_generate_markdown_from_facts()
+
+使 Markdown 文件不再直接使用 LLM 生成的大段总结，而是基于结构化 facts 渲染。
+
+### 4. 新增 LLM Rewrite 层
+
+新增：
+
+_step_rewrite_summary_from_facts()
+_build_rewrite_summary_prompt()
+_parse_rewrite_json()
+
+该层只允许 LLM 做：
+
+去重
+合并
+归类
+改写表达
+整理格式
+
+不允许新增事实、不允许推断、不允许扩展材料外内容。
+
+当前结构为：
+
+Rule Extract 控事实
+LLM Rewrite 控表达
+Rule Render 控输出
+
+## 二、关键问题与修复
+### 问题 1：LLM 直接总结仍会产生幻觉
+
+早期版本中，material_analyze 每一步都直接读取完整材料并调用 LLM，总结效果自然，但容易出现：
+
+材料中没有的阶段判断
+自行规划优先级
+自行补充原因和影响
+泛化成项目管理模板语言
+
+因此决定将 LLM 从“事实生成者”降级为“表达整理者”。
+
+### 问题 2：规则抽取初版输出过硬
+
+纯规则版本解决了 hallucination，但输出存在问题：
+
+语言生硬
+类似数据库 dump
+缺少报告可读性
+进行中、下一步、问题项容易混杂
+
+因此引入 rewrite_summary_from_facts，让 LLM 在 facts 边界内优化表达。
+
+### 问题 3：LLM 返回 JSON list，解析层按 string 处理
+
+测试发现 rewrite_summary 返回：
+
+{
+  "completed": [
+    "Query Understanding（rule-based v1）",
+    "Router",
+    "RAG Pipeline"
+  ]
+}
+
+但 _parse_rewrite_json() 按字符串处理，导致输出变成：
+
+['Query Understanding...', 'Router', 'RAG Pipeline']
+
+已修复：
+
+支持 list → Markdown bullet list
+支持 string → 原样保留
+支持 JSON code block 清洗
+支持非法 JSON fallback 到原始 facts
+
+### 问题 4：重复项去重
+
+测试中出现：
+
+- Router（domain + retrieval mode）
+- Router
+- RAG Pipeline 接入主链路
+- RAG Pipeline
+
+已在解析阶段增加规范化去重逻辑，例如：
+
+.replace("（rule-based v1）", "")
+.replace("（domain + retrieval mode）", "")
+三、当前测试结果
+
+当前生成的项目阶段总结已达到可用状态：
+
+### 当前阶段判断
+
+能够稳定输出：
+
+Milestone M0：First Minimal Work Loop
+已完成工作
+
+能够稳定输出：
+
+Query Understanding（rule-based v1）
+Router（domain + retrieval mode）
+RAG Pipeline 接入主链路
+Skill 机制（可触发）
+Workflow Runtime v1
+Markdown Artifact 输出
+当前问题
+
+能够基于材料抽取：
+
+workflow 未真正读取材料
+存在无依据生成
+roadmap / dev log 未区分
+chunk 粒度不稳定
+无法做结构过滤
+无法按时间 / 类型 / 阶段回答
+回答容易泛化
+metadata 未进入 retrieval filter
+context builder 未使用结构信息
+Agent 输出仍存在补全行为
+
+## 三、当前测试结果
+
+当前生成的项目阶段总结已达到可用状态：
+
+当前阶段判断
+
+### 能够稳定输出：
+
+Milestone M0：First Minimal Work Loop
+已完成工作
+
+### 能够稳定输出：
+
+Query Understanding（rule-based v1）
+Router（domain + retrieval mode）
+RAG Pipeline 接入主链路
+Skill 机制（可触发）
+Workflow Runtime v1
+Markdown Artifact 输出
+当前问题
+
+### 能够基于材料抽取：
+
+workflow 未真正读取材料
+存在无依据生成
+roadmap / dev log 未区分
+chunk 粒度不稳定
+无法做结构过滤
+无法按时间 / 类型 / 阶段回答
+回答容易泛化
+metadata 未进入 retrieval filter
+context builder 未使用结构信息
+Agent 输出仍存在补全行为
+下一步计划
+
+### 能够稳定输出材料中明确出现的未完成项：
+Memory 系统
+自动 Skill 学习
+Quality Harness
+LLM-based Query Understanding
+
+## 四、当前能力判断
+
+当前系统已经完成第一个可用的 grounded workflow 闭环：
+
+用户任务
+↓
+Skill Router
+↓
+Workflow Runtime
+↓
+材料读取
+↓
+事实抽取
+↓
+受控改写
+↓
+Markdown Artifact 输出
+
+这标志着系统已经从：
+
+RAG QA 系统
+
+进一步演进为：
+
+可执行任务并生成交付物的 Agent Workflow
+
+## 五、当前仍存在的问题
+
+### 1. 输出偏“事实清单”，报告感仍有限
+
+虽然不再 hallucination，但输出还偏抽取结果，缺少更自然的项目汇报风格。
+
+### 2. next_steps 目前只来自“未完成”段落
+
+当前策略较保守，避免把当前开发重点误写成下一步计划。
+
+但如果用户希望下一步计划更完整，后续需要区分：
+
+明确未完成项
+当前开发重点
+当前阶段任务
+建议性下一步
+
+### 3. current_stage 信息略偏窄
+
+当前主要输出里程碑，后续可把“当前目标”也纳入阶段判断。
+
+### 4. rules 仍依赖文档结构
+
+如果输入文档没有明确的标题结构，例如没有“已完成 / 进行中 / 未完成”，当前规则抽取能力会下降。
+
+后续需要支持更通用的 facts schema。
+
+## 六、阶段性结论
+
+本阶段最大的进展不是生成了一份 Markdown，而是完成了 Agent Workflow 的关键设计转变：
+
+从：
+
+LLM 直接读材料并总结
+
+升级为：
+
+规则抽取事实
+↓
+LLM 只做受控表达
+↓
+规则渲染 Artifact
+
+这显著降低了 hallucination 风险，并让输出过程更可控、可调试、可复现。
+
+## 七、下一步建议
+
+### P0：固化当前 M0 Workflow
+清理旧的 material_analyze 分支
+保留 extract_project_facts + rewrite_summary + generate_markdown_from_facts
+增加测试用例
+将当前输出作为 M0 验收样例
+
+### P1：增强 facts 抽取泛化能力
+
+支持没有明确标题的文档：
+
+自动识别完成项
+自动识别问题项
+自动识别计划项
+自动识别时间线
+
+### P2：引入 Quality Harness
+为生成报告增加自动检查：
+
+是否包含材料外内容
+是否有重复项
+是否为空
+是否符合模板结构
+是否满足用户要求
+
+### P3：扩展 Skill 系统
+
+在当前 summarize_project_status 基础上扩展：
+
+summarize_dev_log
+generate_weekly_report
+summarize_meeting
+analyze_project_risk
+compare_plan_vs_actual

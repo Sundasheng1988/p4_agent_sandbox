@@ -9,22 +9,57 @@ import numpy as np
 
 from app.core.embeddings import embed_query, cosine_score
 from app.core.llm_client import generate_with_ollama
-from app.core.hybrid_retrieval import hybrid_retrieve
+from app.core.hybrid_retrieval import hybrid_retrieve, hybrid_retrieve_multi_query
 from app.core.context_builder import build_context
 
+from app.core.query_understanding import analyze_query
+from app.core.router import build_retrieval_config
 
-SYSTEM_PROMPT = """你是一个知识库问答助手。
 
-请严格依据提供的知识库上下文回答问题，不要脱离上下文自由发挥。
-如果上下文信息不足，请明确回答：“未在知识库中找到明确答案”。
+SYSTEM_PROMPT = """你是一个严格基于知识库的问答助手（Grounded QA Assistant）。
 
-回答要求：
-1. 必须使用中文回答
-2. 如果英文术语已有常见中文含义，请直接翻译成中文
-3. 不要输出中英混杂词，例如“腰coat pocket”这类表达
-4. 回答尽量简洁、清晰
-5. 优先直接回答问题
-6. 不要编造不存在的信息
+必须遵守以下规则：
+
+【核心原则】
+1. 所有回答必须完全基于提供的“知识库上下文”
+2. 不允许使用常识补充、推测或自行总结未出现的信息
+3. 如果上下文没有明确说明，必须回答：
+   “未在知识库中找到明确答案”
+
+【排序 / 判断类问题】
+4. 如果用户问：
+   - 最大 / 最重要 / 最优先 / 第一 / 核心问题
+   但上下文没有明确排序或结论
+
+   必须回答：
+   “材料中未明确说明”
+
+   然后列出上下文中的所有相关项。
+
+【相关项抽取规则】
+5. 当上下文中出现以下字段或表达时，必须优先抽取为相关项：
+   - 当前发现
+   - 当前问题
+   - 但存在问题
+   - 但：
+   - 问题逐渐明显
+   - 未完成
+   - 仍为空
+   - 无法
+   - 不稳定
+   - 不足
+   - 缺失
+   - 未进入
+   - 未使用
+   - 补全行为
+
+6. 如果用户问“问题是什么 / 核心问题是什么 / 当前问题是什么”，即使材料没有明确写“最大问题”，也要把“当前发现 / 但 / 问题 / 无法 / 不稳定 / 缺失”下面的条目列为相关问题。
+
+【表达要求】
+7. 必须使用中文回答
+8. 优先直接回答问题
+9. 内容简洁清晰
+10. 不允许编造或扩展信息
 """
 
 
@@ -79,11 +114,11 @@ def _load_file_meta(sandbox_root: Path, file_id: str) -> Dict[str, Any]:
 def _match_filters(
     *,
     file_meta: Dict[str, Any],
-    domain: str | None,
+    domains: list[str] | None,
     file_type: str | None,
     source: str | None,
 ) -> bool:
-    if domain and file_meta.get("domain") != domain:
+    if domains and file_meta.get("domain") not in domains:
         return False
     if file_type and file_meta.get("file_type") != file_type:
         return False
@@ -96,7 +131,7 @@ def semantic_retrieve(
     sandbox_root: str,
     question: str,
     top_k: int = 10,
-    domain: str | None = None,
+    domains: list[str] | None = None,
     file_type: str | None = None,
     source: str | None = None,
 ) -> Dict[str, Any]:
@@ -147,7 +182,7 @@ def semantic_retrieve(
 
         if not _match_filters(
             file_meta=file_meta,
-            domain=domain,
+            domains=domains,
             file_type=file_type,
             source=source,
         ):
@@ -204,7 +239,7 @@ def semantic_retrieve(
     return {
         "ok": True,
         "query": question,
-        "domain": domain,
+        "domains": domains,
         "file_type": file_type,
         "source": source,
         "hits": top_hits,
@@ -235,25 +270,83 @@ async def run_rag_pipeline(
     top_k: int = 10,
     max_context_chars: int = 4000,
     extra_context: Any = None,
-    domain: str | None = None,
+    domains: list[str] | None = None,
     file_type: str | None = None,
     source: str | None = None,
 ) -> Dict[str, Any]:
-    retrieval_out = await hybrid_retrieve(
-        ctx,
-        query=question,
-        limit=top_k,
-        domain=domain,
-        file_type=file_type,
-        source=source,
-    )
+    # =========================================================
+    # 1) Query Understanding
+    # =========================================================
+    q = analyze_query(question)
+
+    # =========================================================
+    # 2) Router
+    # 优先使用 query_understanding 结果
+    # 如果调用方显式传入 domains / file_type / source，则仍允许覆盖
+    # =========================================================
+    retrieval_config = build_retrieval_config(q)
+
+    effective_domains = domains if domains is not None else retrieval_config.get("domains")
+    effective_file_type = file_type if file_type is not None else retrieval_config.get("file_type")
+    effective_source = source if source is not None else retrieval_config.get("source")
+    retrieval_mode = retrieval_config.get("mode", "hybrid")
+    retrieval_queries = retrieval_config.get("queries") or [question]
+    effective_filename = retrieval_config.get("filename")
+    effective_doc_role = retrieval_config.get("doc_role")
+    effective_section_title = retrieval_config.get("section_title")
+    effective_section_date = retrieval_config.get("section_date")
+
+    # =========================================================
+    # 3) Retrieval
+    # M4.8.13 Multi-query Retrieval v1
+    # =========================================================
+    max_multi_queries = 4
+    effective_queries = retrieval_queries[:max_multi_queries] if retrieval_queries else [question]
+
+    if len(effective_queries) == 1:
+        effective_query = effective_queries[0]
+        retrieval_out = await hybrid_retrieve(
+            ctx,
+            query=effective_query,
+            limit=top_k,
+            domains=effective_domains,
+            file_type=effective_file_type,
+            source=effective_source,
+            filename=effective_filename,
+            doc_role=effective_doc_role,
+            section_title=effective_section_title,
+            section_date=effective_section_date,
+        )
+    else:
+        effective_query = effective_queries[0]
+        retrieval_out = await hybrid_retrieve_multi_query(
+            ctx,
+            queries=effective_queries,
+            limit=top_k,
+            domains=effective_domains,
+            file_type=effective_file_type,
+            source=effective_source,
+            per_query_limit=max(top_k * 2, 10),
+            filename=effective_filename,
+            doc_role=effective_doc_role,
+            section_title=effective_section_title,
+            section_date=effective_section_date,
+        )
 
     if not retrieval_out.get("ok", False):
         return {
             "question": question,
-            "domain": domain,
-            "file_type": file_type,
-            "source": source,
+            "original_query": q.original_query,
+            "rewritten_query": q.rewritten_query,
+            "retrieval_queries": retrieval_queries,
+            "query_type": q.query_type,
+            "target_domains": effective_domains,
+            "retrieval_mode": retrieval_mode,
+            "routing_reason": retrieval_config.get("routing_reason"),
+            "router_notes": retrieval_config.get("notes", []),
+            "domains": effective_domains,
+            "file_type": effective_file_type,
+            "source": effective_source,
             "hits": [],
             "context": "",
             "prompt": "",
@@ -261,9 +354,18 @@ async def run_rag_pipeline(
             "llm_model": model_name,
             "done": False,
             "error": retrieval_out.get("reason", "hybrid retrieval failed"),
+
+            "filename": effective_filename,
+            "doc_role": effective_doc_role,
+            "section_title": effective_section_title,
+            "section_date": effective_section_date,
         }
 
     hits = retrieval_out.get("hits", []) or []
+
+    # =========================================================
+    # 4) Context Builder
+    # =========================================================
     context = build_context(
         hits=hits,
         max_chars=max_context_chars,
@@ -280,6 +382,9 @@ async def run_rag_pipeline(
             f"{extra_context_text}"
         ).strip()
 
+    # =========================================================
+    # 5) Prompt + LLM
+    # =========================================================
     prompt = build_rag_prompt(question=question, context=final_context)
 
     llm_out = generate_with_ollama(
@@ -290,11 +395,26 @@ async def run_rag_pipeline(
 
     answer = (llm_out.get("response") or "").strip()
 
+    # =========================================================
+    # 6) Debug Fields
+    # 这里是 Week 1 的关键交付
+    # =========================================================
     return {
         "question": question,
-        "domain": domain,
-        "file_type": file_type,
-        "source": source,
+        "original_query": q.original_query,
+        "rewritten_query": q.rewritten_query,
+        "retrieval_queries": retrieval_queries,
+        "query_type": q.query_type,
+        "target_domains": effective_domains,
+        "retrieval_mode": retrieval_mode,
+        "routing_reason": retrieval_config.get("routing_reason"),
+        "router_notes": retrieval_config.get("notes", []),
+        "domains": effective_domains,
+        "file_type": effective_file_type,
+        "source": effective_source,
+        "effective_query": effective_query,
+        "effective_queries": effective_queries,
+        "retrieval_search_mode": retrieval_out.get("search_mode"),
         "hits": hits,
         "context": final_context,
         "prompt": prompt,
@@ -302,4 +422,9 @@ async def run_rag_pipeline(
         "llm_model": llm_out.get("model", model_name),
         "done": llm_out.get("done", True),
         "error": None,
+
+        "filename": effective_filename,
+        "doc_role": effective_doc_role,
+        "section_title": effective_section_title,
+        "section_date": effective_section_date,
     }

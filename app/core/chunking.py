@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
@@ -15,26 +16,137 @@ def _is_markdown(filename: str) -> bool:
     return (filename or "").lower().endswith(".md")
 
 
-def _split_markdown_sections(text: str) -> List[Dict[str, Any]]:
-    """
-    按 Markdown 标题切 section。
-    支持:
-      # title
-      ## title
-      ### title
-      #### title ...
+def _to_iso_datetime(ts: Any) -> Optional[str]:
+    try:
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(float(ts)).isoformat(timespec="seconds")
+    except Exception:
+        return None
 
-    返回:
-    [
-      {
-        "heading_level": 1|2|3...,
-        "section_title": "...",
-        "section_path": [...],
-        "body": "..."
-      },
-      ...
+
+def _to_date_str(ts: Any) -> Optional[str]:
+    try:
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _extract_date_from_text(text: str) -> Optional[str]:
+    s = _normalize_text(text)
+
+    # 2026-03-15 / 2026/03/15 / 2026.03.15
+    m = re.search(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b", s)
+    if m:
+        y, mo, d = m.groups()
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+
+    # 2026年3月15日
+    m = re.search(r"\b(20\d{2})年(\d{1,2})月(\d{1,2})日\b", s)
+    if m:
+        y, mo, d = m.groups()
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+
+    return None
+
+
+def _infer_doc_role(
+    filename: str,
+    section_title: str,
+    section_path: List[str],
+    body: str,
+    file_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    # 1) 优先使用 file_meta 中已有值
+    meta_role = (file_meta or {}).get("doc_role")
+    if meta_role and meta_role != "general":
+        return meta_role
+
+    name = (filename or "").lower()
+    title = (section_title or "").lower()
+    path = " > ".join(section_path or []).lower()
+    text = f"{name}\n{title}\n{path}\n{body}".lower()
+
+    if "roadmap" in text or "路线图" in text:
+        return "roadmap"
+
+    if "dev log" in text or "开发记录" in text or "开发日志" in text:
+        return "dev_log"
+
+    if "trace" in text or "执行轨迹" in text:
+        return "trace"
+
+    if any(k in text for k in ["会议纪要", "meeting notes", "meeting", "minutes"]):
+        return "meeting_notes"
+
+    if any(k in text for k in ["任务描述", "action items", "todo", "owner", "due date"]):
+        return "task_brief"
+
+    if any(k in text for k in ["架构", "architecture", "设计文档", "project doc"]):
+        return "project_doc"
+
+    return "general"
+
+
+def _extract_people(text: str) -> List[str]:
+    s = _normalize_text(text)
+    people: List[str] = []
+
+    # Owner: Alice / 负责人：张三
+    patterns = [
+        r"(?:owner|负责人|责任人)[:：]\s*([A-Za-z\u4e00-\u9fff·_\- ]{2,30})",
+        r"(?:由|assigned to)\s*([A-Za-z\u4e00-\u9fff·_\- ]{2,30})\s*(?:负责|处理)?",
     ]
-    """
+
+    for pat in patterns:
+        for m in re.finditer(pat, s, flags=re.IGNORECASE):
+            name = m.group(1).strip(" .,:;，。；：")
+            if name and name not in people:
+                people.append(name)
+
+    return people[:10]
+
+
+def _extract_due_dates(text: str) -> List[str]:
+    s = _normalize_text(text)
+    out: List[str] = []
+
+    for m in re.finditer(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b", s):
+        y, mo, d = m.groups()
+        val = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+        if val not in out:
+            out.append(val)
+
+    for m in re.finditer(r"\b(20\d{2})年(\d{1,2})月(\d{1,2})日\b", s):
+        y, mo, d = m.groups()
+        val = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+        if val not in out:
+            out.append(val)
+
+    return out[:10]
+
+
+def _extract_action_items(text: str) -> List[str]:
+    s = _normalize_text(text)
+    lines = [ln.strip("-•* \t") for ln in s.splitlines() if ln.strip()]
+    items: List[str] = []
+
+    for ln in lines:
+        low = ln.lower()
+        if any(
+            k in low for k in [
+                "待办", "todo", "action", "行动项", "下一步", "需要",
+                "应当", "计划", "follow up", "owner", "due"
+            ]
+        ):
+            items.append(ln)
+
+    return items[:10]
+
+
+def _split_markdown_sections(text: str) -> List[Dict[str, Any]]:
     text = _normalize_text(text)
     if not text:
         return []
@@ -102,12 +214,6 @@ def _split_long_text(
     chunk_size: int = 800,
     overlap: int = 120,
 ) -> List[Dict[str, Any]]:
-    """
-    对超长文本做二次切块：
-    1) 优先按段落聚合
-    2) 如果单段过长，再按字符窗口切
-    返回 [{"start": x, "end": y, "text": "..."}]
-    """
     text = _normalize_text(text)
     if not text:
         return []
@@ -169,50 +275,65 @@ def _split_long_text(
     flush_buf()
     return chunks
 
+
 def _is_valid_chunk(
     *,
     section_title: str,
     body: str,
     heading_level: int,
 ) -> bool:
-    """
-    过滤低价值 chunk：
-    1. 纯标题空块
-    2. 过短无信息块
-    """
     text = _normalize_text(body)
     title = _normalize_text(section_title)
 
     if not text:
         return False
 
-    # 1) 一级标题且正文基本只有标题本身
     if heading_level == 1:
         if text == title or len(text) <= len(title) + 5:
             return False
 
-    # 2) 太短且信息量很低
     if len(text) < 20:
         return False
 
     return True
+
 
 def _make_embedding_text(
     filename: str,
     section_title: str,
     section_path: List[str],
     body: str,
+    doc_role: Optional[str] = None,
+    created_date: Optional[str] = None,
+    section_date: Optional[str] = None,
+    people: Optional[List[str]] = None,
+    action_items: Optional[List[str]] = None,
 ) -> str:
     parts: List[str] = []
 
     if filename:
         parts.append(f"文件名: {filename}")
 
+    if doc_role:
+        parts.append(f"文档角色: {doc_role}")
+
+    if created_date:
+        parts.append(f"文件日期: {created_date}")
+
+    if section_date:
+        parts.append(f"章节日期: {section_date}")
+
     if section_title:
         parts.append(f"标题: {section_title}")
 
     if section_path:
         parts.append(f"路径: {' > '.join(section_path)}")
+
+    if people:
+        parts.append(f"相关人员: {', '.join(people)}")
+
+    if action_items:
+        parts.append("行动项:\n" + "\n".join(action_items))
 
     if body:
         parts.append(body.strip())
@@ -227,33 +348,25 @@ def build_chunks_for_text(
     text: str,
     chunk_size: int = 800,
     overlap: int = 120,
+    file_meta: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    统一 chunk builder:
-    - Markdown: 标题优先切块
-    - 非 Markdown: 固定长度回退
-
-    返回 chunk rows:
-    [
-      {
-        "chunk_id": "..._0001",
-        "chunk_index": 1,
-        "start": 0,
-        "end": 123,
-        "text": "...",
-        "embedding_text": "...",
-        "section_title": "...",
-        "heading_level": 2,
-        "section_path": [...]
-      }
-    ]
-    """
     text = _normalize_text(text)
     if not text:
         return []
 
     rows: List[Dict[str, Any]] = []
     idx = 1
+
+    file_meta = file_meta or {}
+
+    file_domain = file_meta.get("domain", "general")
+    file_type = file_meta.get("file_type")
+    project_name = file_meta.get("project_name")
+    milestone = file_meta.get("milestone")
+    version_tag = file_meta.get("version_tag")
+    created_at = file_meta.get("created_at")
+    created_at_iso = file_meta.get("created_at_iso") or _to_iso_datetime(created_at)
+    created_date = file_meta.get("created_date") or _to_date_str(created_at)
 
     def push_chunk(
         *,
@@ -279,6 +392,24 @@ def build_chunks_for_text(
         chunk_id = f"{file_id}_{idx:04d}"
         path = section_path or []
 
+        section_date = (
+            _extract_date_from_text(section_title)
+            or _extract_date_from_text(" > ".join(path))
+            or _extract_date_from_text(body[:300])
+        )
+
+        doc_role = _infer_doc_role(
+            filename=filename,
+            section_title=section_title,
+            section_path=path,
+            body=body,
+            file_meta=file_meta,
+        )
+
+        people = _extract_people(body)
+        action_items = _extract_action_items(body)
+        due_dates = _extract_due_dates(body)
+
         rows.append({
             "chunk_id": chunk_id,
             "chunk_index": idx,
@@ -290,10 +421,32 @@ def build_chunks_for_text(
                 section_title=section_title,
                 section_path=path,
                 body=body,
+                doc_role=doc_role,
+                created_date=created_date,
+                section_date=section_date,
+                people=people,
+                action_items=action_items,
             ),
             "section_title": section_title,
             "heading_level": heading_level,
             "section_path": path,
+
+            "filename": filename,
+            "domain": file_domain,
+            "file_type": file_type,
+            "doc_role": doc_role,
+            "project_name": project_name,
+            "milestone": milestone,
+            "version_tag": version_tag,
+
+            "created_at": created_at,
+            "created_at_iso": created_at_iso,
+            "created_date": created_date,
+
+            "section_date": section_date,
+            "people": people,
+            "action_items": action_items,
+            "due_dates": due_dates,
         })
         idx += 1
 
@@ -306,7 +459,6 @@ def build_chunks_for_text(
             path = sec.get("section_path", [])
             body = sec.get("body", "")
 
-            # 标题本身加入正文，强化 section 语义
             section_text = body.strip()
             if title:
                 section_text = f"{title}\n\n{section_text}".strip()

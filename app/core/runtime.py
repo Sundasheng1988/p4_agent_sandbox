@@ -95,3 +95,6 @@ def get_policy():
 def get_file_service():
     return _file_service
 
+
+def get_ctx():
+    return _ctx

@@ -1,0 +1,43 @@
+skill_name: summarize_project_status
+description: 根据当前知识库和项目资料生成阶段总结与风险清单
+task_type: workflow
+
+input_requirements:
+  - roadmap
+  - dev_log
+  - trace
+  - project_docs
+
+steps:
+  - step_name: summary_step
+    action: rag_query
+    prompt: 请根据当前知识库和项目资料，输出当前项目阶段、已完成事项、当前瓶颈和下一步建议。
+    output_key: summary_answer
+
+  - step_name: risk_step
+    action: rag_query
+    prompt: 请根据当前知识库和项目资料，列出当前项目的主要风险、阻塞点和不确定项。
+    output_key: risk_answer
+
+  - step_name: render_step
+    action: render_template
+    template_name: project_status_summary_v1
+    uses:
+      - summary_answer
+      - risk_answer
+    output_key: rendered_content
+
+  - step_name: save_step
+    action: save_artifact
+    uses:
+      - rendered_content
+    output_key: artifact
+
+outputs:
+  artifact_type: markdown
+  artifact_name: project_status_summary
+
+success_criteria:
+  - 必须生成 markdown 文件
+  - 必须包含当前阶段
+  - 必须包含当前风险

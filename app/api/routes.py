@@ -2,14 +2,28 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from pydantic import BaseModel
 
 from app.core.models import TaskRequest
-from app.core.runtime import get_orchestrator, get_audit, get_store
-from app.core.runtime import get_registry, get_policy
-from app.core.runtime import get_file_service
+from app.core.runtime import (
+    get_orchestrator,
+    get_audit,
+    get_store,
+    get_registry,
+    get_policy,
+    get_file_service,
+)
 from app.core.router import route_query
+from app.core.agent_runtime import run_agent_runtime
 
 router = APIRouter()
+
+
+class AgentRuntimeRequest(BaseModel):
+    user_input: str
+    model_name: str = "qwen2.5:7b-instruct"
+    top_k: int = 8
+    max_context_chars: int = 5000
 
 
 @router.get("/health")
@@ -47,12 +61,14 @@ def list_tools():
     out = []
     for name in names:
         spec = specs.get(name)
-        out.append({
-            "name": name,
-            "allowed": (name in pol.allow_tools),
-            "risk": getattr(spec, "risk", "unknown"),
-            "description": getattr(spec, "description", ""),
-        })
+        out.append(
+            {
+                "name": name,
+                "allowed": (name in pol.allow_tools),
+                "risk": getattr(spec, "risk", "unknown"),
+                "description": getattr(spec, "description", ""),
+            }
+        )
     return out
 
 
@@ -98,9 +114,27 @@ def preview_route(q: str):
     route = route_query(q)
     return {
         "query": q,
-        "domain": route.domain,
+        "domains": route.domains,
+        "primary_domain": route.primary_domain,
         "source": route.source,
         "file_type": route.file_type,
         "strategy": route.strategy,
         "notes": route.notes,
     }
+
+
+@router.post("/agent/run")
+async def run_agent(request: AgentRuntimeRequest):
+    from app.core.runtime import get_ctx
+
+    ctx = get_ctx()
+
+    out = await run_agent_runtime(
+        ctx=ctx,
+        sandbox_root=str(ctx.sandbox_root),
+        user_input=request.user_input,
+        model_name=request.model_name,
+        top_k=request.top_k,
+        max_context_chars=request.max_context_chars,
+    )
+    return out

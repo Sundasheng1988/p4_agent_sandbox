@@ -142,11 +142,11 @@ def _load_file_meta(sandbox_root: Path, file_id: str) -> Dict[str, Any]:
 def _match_filters(
     *,
     file_meta: Dict[str, Any],
-    domain: str | None,
+    domains: List[str] | None,
     file_type: str | None,
     source: str | None,
 ) -> bool:
-    if domain and file_meta.get("domain") != domain:
+    if domains and file_meta.get("domain") not in domains:
         return False
     if file_type and file_meta.get("file_type") != file_type:
         return False
@@ -160,12 +160,16 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
 
     query = str(args.get("query", "")).strip()
     limit = int(args.get("limit", 10))
-    domain = args.get("domain")
+
+    domains = args.get("domains")
+    if domains is not None:
+        domains = [str(d).strip() for d in domains if str(d).strip()]
+        if not domains:
+            domains = None
+
     file_type = args.get("file_type")
     source = args.get("source")
 
-    if domain is not None:
-        domain = str(domain).strip() or None
     if file_type is not None:
         file_type = str(file_type).strip() or None
     if source is not None:
@@ -185,7 +189,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             "ok": True,
             "query": query,
             "limit": limit,
-            "domain": domain,
+            "domains": domains,
             "file_type": file_type,
             "source": source,
             "hits": [],
@@ -203,7 +207,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             "ok": True,
             "query": query,
             "limit": limit,
-            "domain": domain,
+            "domains": domains,
             "file_type": file_type,
             "source": source,
             "hits": [],
@@ -244,7 +248,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
 
         if not _match_filters(
             file_meta=file_meta,
-            domain=domain,
+            domains=domains,
             file_type=file_type,
             source=source,
         ):
@@ -322,7 +326,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         "ok": True,
         "query": query,
         "limit": limit,
-        "domain": domain,
+        "domains": domains,
         "file_type": file_type,
         "source": source,
         "model_name": model_name,
@@ -342,7 +346,10 @@ TOOL = ToolSpec(
         "properties": {
             "query": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-            "domain": {"type": ["string", "null"]},
+            "domains": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+            },
             "file_type": {"type": ["string", "null"]},
             "source": {"type": ["string", "null"]},
         },

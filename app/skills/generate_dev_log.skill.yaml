@@ -1,0 +1,36 @@
+skill_name: generate_dev_log
+description: 根据当前项目资料生成 DEV LOG
+task_type: workflow
+
+input_requirements:
+  - roadmap
+  - dev_log
+  - trace
+  - project_docs
+
+steps:
+  - step_name: devlog_step
+    action: rag_query
+    prompt: 请根据当前知识库和项目资料，整理当前主线、已完成内容、当前问题和下一步计划，输出适合写入 DEV LOG 的内容。
+    output_key: dev_log_answer
+
+  - step_name: render_step
+    action: render_template
+    template_name: dev_log_v1
+    uses:
+      - dev_log_answer
+    output_key: rendered_content
+
+  - step_name: save_step
+    action: save_artifact
+    uses:
+      - rendered_content
+    output_key: artifact
+
+outputs:
+  artifact_type: markdown
+  artifact_name: dev_log
+
+success_criteria:
+  - 必须生成 markdown 文件
+  - 必须包含当前主线

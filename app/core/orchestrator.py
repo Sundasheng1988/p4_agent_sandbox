@@ -123,15 +123,49 @@ class Orchestrator:
             )
             return plan
         
+                # =============================
+        # 6.5) 清空/重置知识库：先区分“问”还是“执行”
         # =============================
-        # 6.5) 重置知识库运行数据
-        # =============================
-        if (
+
+        is_question_like = any(x in t for x in ["如何", "怎么", "步骤", "是什么", "为什么", "文档里", "根据知识库回答"])
+        is_reset_topic = (
             "重置知识库" in t
             or "清空知识库" in t
             or "重建前清空知识库" in t
             or "reset knowledge" in t.lower()
-        ):
+            or "清空知识库运行数据" in t
+            or "重置知识库运行数据" in t
+        )
+        is_explicit_action = (
+            "现在帮我清空" in t
+            or "立即清空" in t
+            or "直接清空" in t
+            or "执行清空" in t
+            or "帮我清空" in t
+            or "现在帮我重置" in t
+            or "立即重置" in t
+            or "直接重置" in t
+            or "执行重置" in t
+            or "帮我重置" in t
+        )
+
+        # 先处理：问“如何清空/怎么清空” -> 这是知识问答，不是执行动作
+        if is_question_like and is_reset_topic:
+            plan.append(
+                ToolCall(
+                    name="knowledge_rag_answer",
+                    args={
+                        "question": t,
+                        "top_k": 10,
+                        "max_context_chars": 4000,
+                        "model_name": "qwen2.5:7b-instruct",
+                    },
+                )
+            )
+            return plan
+
+        # 只有明确执行动作时，才允许真正 reset
+        if is_explicit_action and is_reset_topic:
             plan.append(
                 ToolCall(
                     name="knowledge_reset",
@@ -358,17 +392,17 @@ class Orchestrator:
     def _inject_route_args(self, call_name: str, resolved_args: dict) -> dict:
         """
         对知识类检索/问答工具自动注入 route 结果。
-        当前只处理：
-        - knowledge_semantic_search -> 基于 query route
-        - knowledge_rag_answer      -> 基于 question route
+        当前处理：
+        - knowledge_search
+        - knowledge_semantic_search
+        - knowledge_rag_answer
         """
         args = dict(resolved_args or {})
 
         route_text = None
 
-        if call_name == "knowledge_semantic_search":
+        if call_name in {"knowledge_search", "knowledge_semantic_search"}:
             route_text = str(args.get("query", "")).strip()
-
         elif call_name == "knowledge_rag_answer":
             route_text = str(args.get("question", "")).strip()
 
@@ -377,10 +411,12 @@ class Orchestrator:
 
         route = route_query(route_text)
 
-        # 只有用户/上游没有显式传入时，才自动补
-        args.setdefault("domain", route.domain)
-        args.setdefault("file_type", route.file_type)
-        args.setdefault("source", route.source)
+        if "domains" not in args:
+            args["domains"] = route.domains
+        if "file_type" not in args:
+            args["file_type"] = route.file_type
+        if "source" not in args:
+            args["source"] = route.source
 
         return args
     
@@ -405,14 +441,14 @@ class Orchestrator:
         query_key = None
         original_text = None
 
-        if call_name == "knowledge_semantic_search":
+        if call_name in {"knowledge_search", "knowledge_semantic_search"}:
             query_key = "query"
             original_text = str(args.get("query", "")).strip()
 
         elif call_name == "knowledge_rag_answer":
             query_key = "question"
             original_text = str(args.get("question", "")).strip()
-
+    
         else:
             # 非知识检索类工具，不做 rewrite/route
             return args, rewrite_info
@@ -420,7 +456,6 @@ class Orchestrator:
         if not original_text:
             return args, rewrite_info
 
-        # 第一版先默认 rule，可后续切配置
         rw = rewrite_query(
             original_text,
             mode="rule",
@@ -439,14 +474,14 @@ class Orchestrator:
             "meta": rw.get("meta", {}),
         }
 
-        # 把 rewrite 后的 query 回填给 tool
+        # rewrite 后回填
         args[query_key] = rewritten_text
 
-        # 再基于 rewrite 后的文本做 route
+        # route
         route = route_query(rewritten_text)
 
-        if "domain" not in args:
-            args["domain"] = route.domain
+        if "domains" not in args:
+            args["domains"] = route.domains
         if "file_type" not in args:
             args["file_type"] = route.file_type
         if "source" not in args:

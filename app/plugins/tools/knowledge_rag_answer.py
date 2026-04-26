@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from app.core.rag_pipeline import run_rag_pipeline
 from app.tools.spec import ToolSpec
@@ -24,6 +24,20 @@ def _normalize_extra_context(extra_context: Any) -> str:
     return str(extra_context).strip()
 
 
+def _normalize_domains(domains: Any) -> Optional[List[str]]:
+    if domains is None:
+        return None
+
+    if isinstance(domains, str):
+        domains = [domains]
+
+    if isinstance(domains, list):
+        clean = [str(d).strip() for d in domains if str(d).strip()]
+        return clean or None
+
+    return None
+
+
 async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
     args = args or {}
 
@@ -33,12 +47,12 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
     model_name = str(args.get("model_name", "")).strip()
     extra_context = args.get("extra_context")
 
-    domain = args.get("domain")
+    # ✅ multi-domain
+    domains = _normalize_domains(args.get("domains"))
+
     file_type = args.get("file_type")
     source = args.get("source")
 
-    if domain is not None:
-        domain = str(domain).strip() or None
     if file_type is not None:
         file_type = str(file_type).strip() or None
     if source is not None:
@@ -55,6 +69,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
 
     extra_context_text = _normalize_extra_context(extra_context)
 
+    # ✅ 核心：传 domains
     rag_out = await run_rag_pipeline(
         ctx=ctx,
         sandbox_root=ctx.sandbox_root,
@@ -63,7 +78,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         top_k=top_k,
         max_context_chars=max_context_chars,
         extra_context=extra_context_text,
-        domain=domain,
+        domains=domains,   # ← 关键修改
         file_type=file_type,
         source=source,
     )
@@ -75,10 +90,14 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         "question": question,
         "top_k": top_k,
         "model_name": model_name,
-        "domain": domain,
+
+        # ✅ 返回 domains
+        "domains": domains,
         "file_type": file_type,
         "source": source,
+
         "llm_model": rag_out.get("llm_model", model_name),
+
         "hits": [
             {
                 "file_id": h.get("file_id"),
@@ -93,6 +112,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             }
             for h in rag_out.get("hits", [])
         ],
+
         "extra_context_used": bool(extra_context_text),
         "extra_context_preview": extra_context_text[:800],
         "context_preview": full_context[:800],
@@ -117,7 +137,13 @@ TOOL = ToolSpec(
             "max_context_chars": {"type": "integer", "minimum": 500, "maximum": 20000},
             "model_name": {"type": "string"},
             "extra_context": {},
-            "domain": {"type": ["string", "null"]},
+
+            # ✅ 新增 multi-domain
+            "domains": {
+                "type": ["array", "null"],
+                "items": {"type": "string"}
+            },
+
             "file_type": {"type": ["string", "null"]},
             "source": {"type": ["string", "null"]},
         },

@@ -19,3 +19,16 @@ tmp_test/
 # OS
 .DS_Store
 Thumbs.db
+
+# test & temp
+docs/test_kb/
+eval/
+scripts/
+test_week1_l1.py
+
+# experimental roadmap
+docs/milestones/Roadmap/
+
+# marker output
+marker_test/
+output/

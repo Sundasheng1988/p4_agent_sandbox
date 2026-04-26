@@ -90,12 +90,15 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         )
         text = parsed.get("text", "") or ""
 
+        file_meta = await ctx.file_service.get_meta_by_id(file_id)
+
         chunks = build_chunks_for_text(
             file_id=file_id,
             filename=filename,
             text=text,
             chunk_size=chunk_size,
             overlap=overlap,
+            file_meta=file_meta,
         )
 
         record = {
