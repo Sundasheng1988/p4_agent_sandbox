@@ -15,6 +15,24 @@ def _pick_text(hit: Dict[str, Any]) -> str:
 def _normalize_text(s: str) -> str:
     return (s or "").strip().lower()
 
+def _get_metadata(hit: Dict[str, Any]) -> Dict[str, Any]:
+    md = hit.get("metadata")
+    return md if isinstance(md, dict) else {}
+
+
+def _get_chunk_type(hit: Dict[str, Any]) -> str:
+    md = _get_metadata(hit)
+    return str(
+        hit.get("chunk_type")
+        or md.get("chunk_type")
+        or md.get("kind")
+        or ""
+    )
+
+
+def _is_table_row_hit(hit: Dict[str, Any]) -> bool:
+    return _get_chunk_type(hit) == "table_row"
+
 
 def _detect_query_type(query: str) -> str:
     q = _normalize_text(query)
@@ -87,6 +105,7 @@ def _base_score(hit: Dict[str, Any]) -> float:
 
 def _score_hit(hit: Dict[str, Any], query_type: str) -> float:
     score = _base_score(hit)
+    intent_score = float(hit.get("intent_match_score", 0) or 0)
 
     section_title = _normalize_text(
         str(hit.get("section_title") or hit.get("section") or "")
@@ -95,6 +114,9 @@ def _score_hit(hit: Dict[str, Any], query_type: str) -> float:
     text = _normalize_text(_pick_text(hit))
 
     boost = 0.0
+    # 结构化表格命中优先进入上下文
+    if intent_score > 0:
+        boost += intent_score
 
     # -------- 通用 boost --------
     if "system architecture" in section_title:
@@ -315,11 +337,25 @@ def _order_hits_for_context(hits: List[Dict[str, Any]], query: str = "") -> List
             ),
         )
 
-    # general：保持原有 group + chunk 顺序
+        # general：
+    # 如果是表格行，优先按 context_score 排序，不能再按 chunk_index 把早页噪音排前面
+    table_hits = [h for h in enriched_hits if _is_table_row_hit(h)]
+    normal_hits = [h for h in enriched_hits if not _is_table_row_hit(h)]
+
+    table_hits_sorted = sorted(
+        table_hits,
+        key=lambda x: (
+            -float(x.get("_context_score", 0.0)),
+            -float(x.get("score", 0.0)),
+            x.get("chunk_index") is None,
+            int(x.get("chunk_index") or 0),
+        ),
+    )
+
     grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     group_best_score: Dict[Tuple[str, str], float] = {}
 
-    for hit in enriched_hits:
+    for hit in normal_hits:
         key = _group_key(hit)
         grouped.setdefault(key, []).append(hit)
 
@@ -333,25 +369,30 @@ def _order_hits_for_context(hits: List[Dict[str, Any]], query: str = "") -> List
         reverse=True,
     )
 
-    ordered_hits: List[Dict[str, Any]] = []
+    ordered_normal_hits: List[Dict[str, Any]] = []
     for key in ordered_group_keys:
         group_hits = grouped[key]
         group_hits_sorted = sorted(
             group_hits,
             key=lambda x: (
+                -float(x.get("_context_score", 0.0)),
                 x.get("chunk_index") is None,
                 int(x.get("chunk_index") or 0),
             ),
         )
-        ordered_hits.extend(group_hits_sorted)
+        ordered_normal_hits.extend(group_hits_sorted)
 
-    return ordered_hits
+    return table_hits_sorted + ordered_normal_hits
 
 
 # =========================================================
 # M4.5.4.2 Adjacent Chunk Merge
 # =========================================================
 def _can_merge_adjacent(prev_hit: Dict[str, Any], cur_hit: Dict[str, Any]) -> bool:
+    # 表格行是原子证据，不允许和相邻行合并
+    if _is_table_row_hit(prev_hit) or _is_table_row_hit(cur_hit):
+        return False
+    
     if str(prev_hit.get("filename") or "") != str(cur_hit.get("filename") or ""):
         return False
 

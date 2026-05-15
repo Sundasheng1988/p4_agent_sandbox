@@ -169,6 +169,9 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
 
     file_type = args.get("file_type")
     source = args.get("source")
+    file_id_filter = args.get("file_id")
+    if file_id_filter is not None:
+        file_id_filter = str(file_id_filter).strip() or None
 
     if file_type is not None:
         file_type = str(file_type).strip() or None
@@ -195,6 +198,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             "hits": [],
             "hits_total": 0,
             "reason": "vector_index.json not found; run knowledge_build_embeddings first",
+            "file_id": file_id_filter,
         }
 
     vector_index = _load_json(vector_index_path)
@@ -213,6 +217,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             "hits": [],
             "hits_total": 0,
             "reason": "vector index is empty",
+            "file_id": file_id_filter,
         }
 
     query_vec = embed_query(
@@ -228,6 +233,8 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         file_id = item.get("file_id", "")
         filename = item.get("filename", "")
         manifest_rel = item.get("record_path")
+        if file_id_filter and str(file_id) != str(file_id_filter):
+            continue
 
         if not manifest_rel:
             continue
@@ -333,6 +340,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         "hits": top_hits,
         "hits_total": len(hits),
         "filtered_file_count": filtered_file_count,
+        "file_id": file_id_filter,
     }
 
 
@@ -351,6 +359,7 @@ TOOL = ToolSpec(
                 "items": {"type": "string"},
             },
             "file_type": {"type": ["string", "null"]},
+            "file_id": {"type": ["string", "null"]},
             "source": {"type": ["string", "null"]},
         },
         "required": ["query"],

@@ -273,11 +273,22 @@ async def run_rag_pipeline(
     domains: list[str] | None = None,
     file_type: str | None = None,
     source: str | None = None,
+    file_id: str | None = None,
+    query_understanding_model: str | None = None,
+    use_query_understanding_llm: bool = True,
+    skip_llm: bool = False,
+    exclude_table_chunks: bool = False,
+    section_type: str | None = None,
+    financial_topic: str | None = None,
 ) -> Dict[str, Any]:
     # =========================================================
     # 1) Query Understanding
     # =========================================================
-    q = analyze_query(question)
+    q = analyze_query(
+        question,
+        model_name=query_understanding_model or model_name,
+        use_llm=use_query_understanding_llm,
+    )
 
     # =========================================================
     # 2) Router
@@ -295,6 +306,7 @@ async def run_rag_pipeline(
     effective_doc_role = retrieval_config.get("doc_role")
     effective_section_title = retrieval_config.get("section_title")
     effective_section_date = retrieval_config.get("section_date")
+    semantic_intent = retrieval_config.get("semantic_intent") or {}
 
     # =========================================================
     # 3) Retrieval
@@ -308,7 +320,7 @@ async def run_rag_pipeline(
         retrieval_out = await hybrid_retrieve(
             ctx,
             query=effective_query,
-            limit=top_k,
+            limit=max(1, min(int(top_k), 50)),
             domains=effective_domains,
             file_type=effective_file_type,
             source=effective_source,
@@ -316,21 +328,29 @@ async def run_rag_pipeline(
             doc_role=effective_doc_role,
             section_title=effective_section_title,
             section_date=effective_section_date,
+            section_type=section_type,
+            financial_topic=financial_topic,
+            semantic_intent=semantic_intent,
+            file_id=file_id,
         )
     else:
         effective_query = effective_queries[0]
         retrieval_out = await hybrid_retrieve_multi_query(
             ctx,
             queries=effective_queries,
-            limit=top_k,
+            limit=max(1, min(int(top_k), 50)),
             domains=effective_domains,
             file_type=effective_file_type,
             source=effective_source,
-            per_query_limit=max(top_k * 2, 10),
+            per_query_limit=min(max(top_k * 2, 10), 50),
             filename=effective_filename,
             doc_role=effective_doc_role,
             section_title=effective_section_title,
             section_date=effective_section_date,
+            section_type=section_type,
+            financial_topic=financial_topic,
+            semantic_intent=semantic_intent,
+            file_id=file_id,
         )
 
     if not retrieval_out.get("ok", False):
@@ -342,11 +362,13 @@ async def run_rag_pipeline(
             "query_type": q.query_type,
             "target_domains": effective_domains,
             "retrieval_mode": retrieval_mode,
+            "semantic_intent": semantic_intent,
             "routing_reason": retrieval_config.get("routing_reason"),
             "router_notes": retrieval_config.get("notes", []),
             "domains": effective_domains,
             "file_type": effective_file_type,
             "source": effective_source,
+            "file_id": file_id,
             "hits": [],
             "context": "",
             "prompt": "",
@@ -359,9 +381,21 @@ async def run_rag_pipeline(
             "doc_role": effective_doc_role,
             "section_title": effective_section_title,
             "section_date": effective_section_date,
+            "section_type": section_type,
+            "financial_topic": financial_topic,
+
+            "query_understanding_model": q.understanding_model,
+            "use_query_understanding_llm": use_query_understanding_llm,
         }
 
     hits = retrieval_out.get("hits", []) or []
+
+    if exclude_table_chunks:
+        hits = [
+            h for h in hits
+            if "_table_" not in str(h.get("chunk_id", ""))
+            and not str(h.get("snippet", "")).startswith("表格来源：")
+        ]
 
     # =========================================================
     # 4) Context Builder
@@ -385,6 +419,43 @@ async def run_rag_pipeline(
     # =========================================================
     # 5) Prompt + LLM
     # =========================================================
+    if skip_llm:
+        return {
+            "question": question,
+            "original_query": q.original_query,
+            "rewritten_query": q.rewritten_query,
+            "retrieval_queries": retrieval_queries,
+            "query_type": q.query_type,
+            "target_domains": effective_domains,
+            "retrieval_mode": retrieval_mode,
+            "semantic_intent": semantic_intent,
+            "routing_reason": retrieval_config.get("routing_reason"),
+            "router_notes": retrieval_config.get("notes", []),
+            "domains": effective_domains,
+            "file_type": effective_file_type,
+            "source": effective_source,
+            "file_id": file_id,
+            "effective_query": effective_query,
+            "effective_queries": effective_queries,
+            "retrieval_search_mode": retrieval_out.get("search_mode"),
+            "hits": hits,
+            "context": final_context,
+            "prompt": "",
+            "answer": "",
+            "llm_model": model_name,
+            "done": True,
+            "error": None,
+            "filename": effective_filename,
+            "doc_role": effective_doc_role,
+            "section_title": effective_section_title,
+            "section_date": effective_section_date,
+            "section_type": section_type,
+            "financial_topic": financial_topic,
+            "query_understanding_model": q.understanding_model,
+            "use_query_understanding_llm": use_query_understanding_llm,
+            "skip_llm": True,
+        }
+    
     prompt = build_rag_prompt(question=question, context=final_context)
 
     llm_out = generate_with_ollama(
@@ -407,11 +478,13 @@ async def run_rag_pipeline(
         "query_type": q.query_type,
         "target_domains": effective_domains,
         "retrieval_mode": retrieval_mode,
+        "semantic_intent": semantic_intent,
         "routing_reason": retrieval_config.get("routing_reason"),
         "router_notes": retrieval_config.get("notes", []),
         "domains": effective_domains,
         "file_type": effective_file_type,
         "source": effective_source,
+        "file_id": file_id,
         "effective_query": effective_query,
         "effective_queries": effective_queries,
         "retrieval_search_mode": retrieval_out.get("search_mode"),
@@ -427,4 +500,9 @@ async def run_rag_pipeline(
         "doc_role": effective_doc_role,
         "section_title": effective_section_title,
         "section_date": effective_section_date,
+        "section_type": section_type,
+        "financial_topic": financial_topic,
+
+        "query_understanding_model": q.understanding_model,
+        "use_query_understanding_llm": use_query_understanding_llm,
     }

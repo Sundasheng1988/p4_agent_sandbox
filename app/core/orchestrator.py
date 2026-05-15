@@ -200,7 +200,7 @@ class Orchestrator:
                     name="knowledge_build_chunks",
                     args={
                         "limit": 500,
-                        "max_chars": 50000,
+                        "max_chars": 500000,
                         "chunk_size": 800,
                         "overlap": 120,
                         "force": False,

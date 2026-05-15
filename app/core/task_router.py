@@ -34,6 +34,29 @@ def route_task(user_input: str) -> TaskRoutingResult:
         "输出总结",
     ]
 
+    financial_report_keywords = [
+        "财报",
+        "财务报告",
+        "财务分析",
+        "分析财报",
+        "季度报告",
+        "一季度报告",
+        "半年报",
+        "年报",
+        "利润表",
+        "资产负债表",
+        "现金流量表",
+        "financial report",
+        "financial analysis",
+    ]
+
+    if any(k in q for k in financial_report_keywords):
+        return TaskRoutingResult(
+            task_type="skill",
+            skill_name="analyze_financial_report",
+            reason="matched_financial_report_keywords",
+        )
+
     if any(k in q for k in devlog_keywords):
         return TaskRoutingResult(
             task_type="skill",

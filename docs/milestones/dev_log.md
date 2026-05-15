@@ -2702,3 +2702,216 @@ generate_weekly_report
 summarize_meeting
 analyze_project_risk
 compare_plan_vs_actual
+
+# 2026-04-26 晚
+
+财务分析 Workflow（新增能力）
+一、实现目标
+
+在 M0 grounded workflow 基础上，新增一个完整能力：
+
+财报 PDF → 结构化解析 → 指标抽取 → Markdown 报告
+
+实现从“项目总结类任务”扩展到“结构化数据分析类任务”。
+
+二、核心流程（Workflow）
+
+当前财务分析流程为：
+
+collect_financial_inputs
+↓
+extract_financial_text
+↓
+extract_financial_tables
+↓
+build_financial_summary
+↓
+generate_financial_report
+三、模块说明
+1️⃣ collect_financial_inputs
+
+作用：
+
+读取财报解析结果目录（当前为 marker 输出）
+提供：
+markdown_path（文本）
+tables_dir（表格 CSV / JSON）
+
+👉 本质：数据入口层
+
+2️⃣ extract_financial_text
+
+作用：
+
+读取财报正文（MD）
+提供预览与文本长度
+
+👉 当前未参与计算，作为后续 LLM 分析预留
+
+3️⃣ extract_financial_tables
+
+作用：
+
+扫描 tables 目录
+收集所有 CSV / JSON 表格信息
+
+👉 本质：结构化数据索引
+
+4️⃣ build_financial_summary（核心模块）
+
+作用：
+
+读取主表（page_1_table_1.csv）
+自动解析：
+指标名 → 多列数值（本期 / 同期 / 增速）
+转换为结构化 JSON：
+{
+  "metrics": {
+    "营业收入": {
+      "本报告期": {...},
+      "上年同期": {...}
+    }
+  }
+}
+
+👉 本质：规则型结构化抽取（无 LLM）
+
+5️⃣ generate_financial_report
+
+作用：
+
+将 metrics 渲染为 Markdown 报告
+输出：
+财务指标
+初步分析（固定模板）
+风险提示
+
+👉 本质：规则渲染（无 hallucination）
+
+四、当前架构特点（非常关键）
+
+这一套和 summarize_project_status 的架构是一致的设计哲学：
+
+Rule Extract（事实）
+↓
+Rule Transform（结构化）
+↓
+Rule Render（输出）
+
+区别在于：
+
+模块	项目总结	财务分析
+输入	文本材料	表格数据
+Extract	rule NLP	rule parsing
+LLM	rewrite only	暂未使用
+输出	Markdown	Markdown
+五、当前优势
+✅ 1. 完全无 hallucination
+不依赖 LLM 生成数据
+所有数值来自 CSV
+✅ 2. 可复现
+同一输入 → 完全一致输出
+不受模型波动影响
+✅ 3. 可调试
+每一步都有中间结果：
+tables
+summary
+metrics
+✅ 4. 已具备 Agent 能力雏形
+
+系统已经能完成：
+
+识别任务 → 执行 workflow → 输出报告
+
+而不是：
+
+只做问答
+六、当前限制
+⚠️ 1. 数据来源仍是“外部预处理”
+marker → CSV → Agent
+
+还不是：
+
+PDF → Agent 自动解析
+⚠️ 2. 只解析首页表格
+未覆盖三大报表
+未处理多表关联
+⚠️ 3. 无分析能力（只有展示）
+
+目前：
+
+展示数据 ✔
+解释数据 ✖
+七、下一步计划
+P0（下一步必须做）
+
+👉 接入 PDF 自动解析
+
+upload PDF
+↓
+parse_financial_pdf（新 step）
+↓
+生成 MD + CSV
+P1（增强分析能力）
+
+新增：
+
+同比 / 环比计算
+利润率分析
+现金流质量分析
+P2（引入 LLM 分析层）
+
+在结构化数据之上增加：
+
+LLM 解释（受控）
+
+例如：
+
+收入增长原因分析
+利润变化解读
+风险判断
+P3（统一 Agent 能力）
+
+将财务分析纳入统一模式：
+
+Task Router
+→ Skill
+→ Workflow
+→ Artifact
+
+
+#📌 4/27 核心进展（精简版）
+✅ 新增能力：PDF → MD 自动解析链路打通
+
+已实现完整流程：
+
+上传 PDF
+↓
+Agent 自动识别最新 PDF
+↓
+PyMuPDF 抽取全文
+↓
+生成 report.md
+✅ 同时完成
+pdfplumber 表格抽取 → CSV / JSON
+table_index.json 自动建立
+workflow 全链路打通（collect → parse → extract → report）
+
+👉 结论：
+系统已具备“从原始 PDF 到结构化中间结果（MD + 表格）”的自动处理能力
+
+⚠️ 当前限制（关键一句话）
+仅完成“解析层”，尚未具备“表格语义识别能力”（仍依赖固定表）
+🧪 测试指令（完整可复现）
+1️⃣ 上传 PDF
+curl -sS -X POST http://127.0.0.1:8000/files/upload \
+-F "file=@/你的PDF路径.pdf" \
+| python -c "import sys,json;print(json.dumps(json.load(sys.stdin),indent=2,ensure_ascii=False))"
+2️⃣ 运行 Agent 财报分析
+curl -sS -X POST http://127.0.0.1:8000/agent/run \
+-H "Content-Type: application/json" \
+-d '{"user_input":"分析最新上传的财报"}' \
+| python -c "import sys,json;print(json.dumps(json.load(sys.stdin),indent=2,ensure_ascii=False))"
+🎯 一句话总结（给你写在最上面用）
+
+已完成 PDF → MD + 表格 的自动解析能力，并成功接入 Agent workflow，实现从上传文件到财报报告生成的端到端闭环（基础版）。

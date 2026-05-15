@@ -210,4 +210,6 @@ def build_retrieval_config(q: QueryUnderstandingResult) -> Dict[str, Any]:
         "doc_role": q.doc_role,
         "section_title": q.section_title,
         "section_date": q.section_date,
+
+        "semantic_intent": q.semantic_intent or {},
     }

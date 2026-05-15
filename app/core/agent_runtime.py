@@ -5,32 +5,8 @@ from typing import Any, Dict
 
 from app.core.rag_pipeline import run_rag_pipeline
 from app.core.workflow_runtime import execute_workflow
+from app.core.task_router import route_task
 from app.skills import load_skills
-
-
-def _route_task(user_input: str) -> Dict[str, Any]:
-    text = (user_input or "").strip()
-
-    project_status_markers = [
-        "项目阶段总结",
-        "项目状态",
-        "阶段总结",
-        "风险清单",
-        "当前项目状态",
-    ]
-
-    if any(k in text for k in project_status_markers):
-        return {
-            "task_type": "skill",
-            "skill_name": "summarize_project_status",
-            "reason": "matched_project_status_keywords",
-        }
-
-    return {
-        "task_type": "qa",
-        "skill_name": None,
-        "reason": "default_to_qa",
-    }
 
 
 async def run_agent_runtime(
@@ -42,7 +18,13 @@ async def run_agent_runtime(
     top_k: int = 8,
     max_context_chars: int = 5000,
 ) -> Dict[str, Any]:
-    task_route = _route_task(user_input)
+    routing = route_task(user_input)
+
+    task_route = {
+        "task_type": routing.task_type,
+        "skill_name": routing.skill_name,
+        "reason": routing.reason,
+    }
 
     if task_route["task_type"] == "qa":
         rag_result = await run_rag_pipeline(

@@ -6,6 +6,22 @@ from typing import Any, Dict, List, Tuple
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from app.skills.financial.pdf_parser import parse_financial_pdf
+from app.skills.financial.extractor import (
+    collect_financial_inputs,
+    extract_financial_text,
+    extract_financial_tables,
+    extract_financial_evidence,
+    build_financial_summary,
+)
+from app.skills.financial.analyzer import analyze_financial_metrics
+from app.skills.financial.reporter import generate_financial_report
+from app.skills.financial.reasoner import (
+    extract_financial_reasons,
+    verify_financial_reasons,
+)
+from app.skills.financial.rag_reasoner import analyze_financial_with_rag
+from app.skills.financial.knowledge_adapter import register_financial_markdown
 
 # =========================================================
 # Utils
@@ -735,36 +751,6 @@ async def _step_generate_markdown_from_facts(
     }
 
 
-def _build_analysis_prompt(
-    *,
-    section_title: str,
-    user_question: str,
-    materials_context: str,
-) -> str:
-    return f"""你是一个项目分析助理。
-
-你的任务不是自由发挥，而是严格基于“项目材料”输出结论。
-
-要求：
-1. 必须使用中文
-2. 必须优先依据材料作答
-3. 如果材料不足，明确写“材料中未体现”或“当前材料不足以判断”
-4. 不要编造不存在的模块、计划、里程碑、风险或进展
-5. 不要输出 JSON、代码、日志原文
-6. 语言简洁、正式、适合项目汇报
-
-当前分析部分：{section_title}
-
-用户问题：
-{user_question}
-
-项目材料：
-{materials_context}
-
-请直接输出该部分的正式内容：
-""".strip()
-
-
 async def _step_material_analyze(
     *,
     ctx,
@@ -908,6 +894,7 @@ async def execute_workflow(
     top_k: int = 8,
     max_context_chars: int = 5000,
 ) -> Dict[str, Any]:
+
     steps: List[Dict[str, Any]] = workflow.get("steps", []) or []
 
     state: Dict[str, Any] = {
@@ -916,6 +903,40 @@ async def execute_workflow(
         "step_results": [],
     }
 
+    # =========================
+    # Skill Registry（核心）
+    # =========================
+    SKILL_MAP = {
+        # ===== Financial Pipeline =====
+        "collect_financial_inputs": collect_financial_inputs,
+        "parse_financial_pdf": parse_financial_pdf,
+        "extract_financial_text": extract_financial_text,
+        "extract_financial_tables": extract_financial_tables,
+        "extract_financial_evidence": extract_financial_evidence,
+        "build_financial_summary": build_financial_summary,
+        "analyze_financial_metrics": analyze_financial_metrics,
+        "generate_financial_report": generate_financial_report,
+
+        # ===== Project Analysis Pipeline =====
+        "collect_materials": _step_collect_materials,
+        "register_financial_markdown": register_financial_markdown,
+        "extract_project_facts": _step_extract_project_facts,
+        "rewrite_summary_from_facts": _step_rewrite_summary_from_facts,
+        "generate_markdown_from_facts": _step_generate_markdown_from_facts,
+        "analyze_financial_with_rag": analyze_financial_with_rag,
+
+        # ===== Legacy / fallback =====
+        "material_analyze": _step_material_analyze,
+        "generate_markdown": _step_generate_markdown,
+
+        # ===== Reasoning =====
+        "extract_financial_reasons": extract_financial_reasons,
+        "verify_financial_reasons": verify_financial_reasons,
+    }
+
+    # =========================
+    # Execute Steps
+    # =========================
     for step in steps:
         step_key = step.get("key", "")
         step_type = step.get("type", "")
@@ -927,65 +948,72 @@ async def execute_workflow(
                 "state": state,
             }
 
-        if step_type == "collect_materials":
-            out = await _step_collect_materials(
-                ctx=ctx,
-                sandbox_root=sandbox_root,
-                step=step,
-                state=state,
-            )
+        fn = SKILL_MAP.get(step_type)
 
-        elif step_type == "material_analyze":
-            out = await _step_material_analyze(
-                ctx=ctx,
-                sandbox_root=sandbox_root,
-                step=step,
-                state=state,
-                model_name=model_name,
-                max_context_chars=max_context_chars,
-            )
-        
-        elif step_type == "extract_project_facts":
-            out = await _step_extract_project_facts(
-                ctx=ctx,
-                sandbox_root=sandbox_root,
-                step=step,
-                state=state,
-            )
-        
-        elif step_type == "rewrite_summary_from_facts":
-            out = await _step_rewrite_summary_from_facts(
-                ctx=ctx,
-                sandbox_root=sandbox_root,
-                step=step,
-                state=state,
-                model_name=model_name,
-            )
-
-        elif step_type == "generate_markdown_from_facts":
-            out = await _step_generate_markdown_from_facts(
-                ctx=ctx,
-                sandbox_root=sandbox_root,
-                step=step,
-                state=state,
-            )
-        
-
-        elif step_type == "generate_markdown":
-            out = await _step_generate_markdown(
-                ctx=ctx,
-                sandbox_root=sandbox_root,
-                step=step,
-                state=state,
-            )
-
-        else:
+        if not fn:
             return {
                 "ok": False,
                 "error": f"unknown step type: {step_type}",
                 "state": state,
             }
 
+        try:
+            # 👉 特殊处理（需要额外参数的 step）
+            if step_type == "material_analyze":
+                out = await fn(
+                    ctx=ctx,
+                    sandbox_root=sandbox_root,
+                    step=step,
+                    state=state,
+                    model_name=model_name,
+                    max_context_chars=max_context_chars,
+                )
+            
+            elif step_type == "analyze_financial_with_rag":
+                out = await fn(
+                    ctx=ctx,
+                    sandbox_root=sandbox_root,
+                    step=step,
+                    state=state,
+                    model_name=model_name,
+                )
+
+            elif step_type == "rewrite_summary_from_facts":
+                out = await fn(
+                    ctx=ctx,
+                    sandbox_root=sandbox_root,
+                    step=step,
+                    state=state,
+                    model_name=model_name,
+                )
+            
+            elif step_type == "extract_financial_reasons":
+                out = await fn(
+                    ctx=ctx,
+                    sandbox_root=sandbox_root,
+                    step=step,
+                    state=state,
+                    model_name=model_name,
+                )
+
+            else:
+                out = await fn(
+                    ctx=ctx,
+                    sandbox_root=sandbox_root,
+                    step=step,
+                    state=state,
+                )
+
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"step exception: {step_key} -> {str(e)}",
+                "state": state,
+            }
+
+        # =========================
+        # Save State
+        # =========================
         state[step_key] = out
         state["step_results"].append(
             {
@@ -995,6 +1023,9 @@ async def execute_workflow(
             }
         )
 
+        # =========================
+        # Fail Fast
+        # =========================
         if not out.get("ok", False):
             return {
                 "ok": False,
@@ -1002,8 +1033,21 @@ async def execute_workflow(
                 "state": state,
             }
 
-    final_artifact = state.get("generate_report", {}).get("artifact")
-    final_output = state.get("generate_report", {}).get("content", "")
+    # =========================
+    # Final Output（通用版本）
+    # =========================
+    final_artifact = None
+    final_output = ""
+
+    # 从后往前找“最后一个有 artifact 的 step”
+    for step_result in reversed(state.get("step_results", [])):
+        step_key = step_result.get("key")
+        step_state = state.get(step_key, {})
+
+        if isinstance(step_state, dict) and step_state.get("artifact"):
+            final_artifact = step_state.get("artifact")
+            final_output = step_state.get("content", "")
+            break
 
     return {
         "ok": True,

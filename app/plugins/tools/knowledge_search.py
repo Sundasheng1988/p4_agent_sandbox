@@ -113,6 +113,7 @@ def _build_summary_hits(
     domains: List[str] | None,
     file_type: str | None,
     source: str | None,
+    file_id: str | None = None,
 ) -> Dict[str, Any]:
     """
     summary 模式：保留文件级搜索
@@ -126,23 +127,27 @@ def _build_summary_hits(
         except Exception:
             continue
 
-        file_id = rec.get("file_id") or p.stem.replace(".summary", "")
+        current_file_id = rec.get("file_id") or p.stem.replace(".summary", "")
+        if file_id and str(current_file_id) != str(file_id):
+            continue
+
         filename = rec.get("filename") or ""
         summary = rec.get("summary") or ""
         source_chars = int(rec.get("source_chars") or 0)
 
-        meta = _load_file_meta(sandbox_root, file_id=file_id)
+        meta = _load_file_meta(sandbox_root, file_id=current_file_id)
+
         if not _meta_match(meta, domains=domains, file_type=file_type, source=source):
             continue
 
-        filtered_file_ids.add(file_id)
+        filtered_file_ids.add(current_file_id)
 
         score = _score_text(summary, query)
         if score <= 0:
             continue
 
         hit = {
-            "file_id": file_id,
+            "file_id": current_file_id,
             "filename": filename,
             "chunk_id": None,
             "chunk_index": None,
@@ -182,6 +187,7 @@ def _build_text_hits(
     domains: List[str] | None,
     file_type: str | None,
     source: str | None,
+    file_id: str | None = None,
 ) -> Dict[str, Any]:
     """
     text 模式：chunk 级搜索
@@ -195,15 +201,20 @@ def _build_text_hits(
         except Exception:
             continue
 
-        file_id = rec.get("file_id") or p.stem.replace(".chunks", "")
+        current_file_id = rec.get("file_id") or p.stem.replace(".chunks", "")
+
+        if file_id and str(current_file_id) != str(file_id):
+            continue
+
         filename = rec.get("filename") or ""
         chunks = rec.get("chunks", []) or []
 
-        meta = _load_file_meta(sandbox_root, file_id=file_id)
+        meta = _load_file_meta(sandbox_root, file_id=current_file_id)
+
         if not _meta_match(meta, domains=domains, file_type=file_type, source=source):
             continue
 
-        filtered_file_ids.add(file_id)
+        filtered_file_ids.add(current_file_id)
 
         for c in chunks:
             text = str(c.get("text", "") or "")
@@ -212,7 +223,7 @@ def _build_text_hits(
                 continue
 
             hit = {
-                "file_id": file_id,
+                "file_id": current_file_id,
                 "filename": filename,
                 "chunk_id": c.get("chunk_id"),
                 "chunk_index": c.get("chunk_index"),
@@ -258,6 +269,9 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
 
     file_type = args.get("file_type")
     source = args.get("source")
+    file_id = args.get("file_id")
+    if file_id is not None:
+        file_id = _normalize(str(file_id)) or None
 
     if file_type is not None:
         file_type = _normalize(str(file_type)) or None
@@ -298,6 +312,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             domains=domains,
             file_type=file_type,
             source=source,
+            file_id=file_id,
         )
 
     else:
@@ -322,6 +337,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
             domains=domains,
             file_type=file_type,
             source=source,
+            file_id=file_id,
         )
 
     return {
@@ -335,6 +351,7 @@ async def _handler(ctx, args: Dict[str, Any]) -> Dict[str, Any]:
         "hits": out["hits"],
         "hits_total": out["hits_total"],
         "filtered_file_count": out["filtered_file_count"],
+        "file_id": file_id,
     }
 
 
@@ -354,6 +371,7 @@ TOOL = ToolSpec(
                 "items": {"type": "string"},
             },
             "file_type": {"type": ["string", "null"]},
+            "file_id": {"type": ["string", "null"]},
             "source": {"type": ["string", "null"]},
         },
         "required": ["query"],

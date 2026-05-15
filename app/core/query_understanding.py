@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 from typing import List
 import re
+import json
+from app.core.llm_client import generate_with_ollama
 
 
 # =========================
@@ -17,11 +19,13 @@ class QueryUnderstandingResult:
     retrieval_mode: str
     routing_reason: str
 
-    # ===== M0 Grounding Constraints =====
     filename: str | None = None
     doc_role: str | None = None
     section_title: str | None = None
     section_date: str | None = None
+
+    semantic_intent: dict | None = None
+    understanding_model: str | None = None
 
 
 # =========================
@@ -323,12 +327,285 @@ def build_retrieval_queries(
 
     return _unique_keep_order(queries)
 
+def infer_table_intent_rule(query: str) -> dict:
+    """
+    通用表格意图兜底：
+    识别“某个对象 + 某个字段/属性是什么”的问题。
+    不绑定财报，只抽 row_entity / column_field。
+    """
+    q = (query or "").strip()
+    q = q.replace("？", "").replace("?", "").strip()
+
+    if not q:
+        return {}
+
+    # 常见问法：A 的 B 是什么 / A B 是什么 / A B 多少
+    patterns = [
+        r"^(.+?)的(.+?)(?:是什么|是多少|为多少|多少|情况|说明)$",
+        r"^(.+?)(.+?)(?:是什么|是多少|为多少|多少)$",
+    ]
+
+    # 通用字段候选，不限财报
+    field_words = [
+        "重大变动说明",
+        "形成原因说明",
+        "是否具有可持续性",
+        "金额",
+        "期末数",
+        "期初数",
+        "本期数",
+        "上期数",
+        "占比",
+        "比例",
+        "原因",
+        "说明",
+        "状态",
+        "结果",
+        "日期",
+        "名称",
+        "类型",
+        "数量",
+        "金额",
+        "负责人",
+        "备注",
+    ]
+
+    for field in field_words:
+        if field in q:
+            row_entity = q.replace(field, "")
+            row_entity = re.sub(r"(是什么|是多少|为多少|多少|情况|说明)$", "", row_entity)
+            row_entity = row_entity.replace("的", "").strip()
+
+            if row_entity and row_entity != field:
+                return {
+                    "wants_table": True,
+                    "row_entity": row_entity,
+                    "column_field": field,
+                    "expected_chunk_type": "table_row",
+                    "answer_style": "direct",
+                }
+
+    for p in patterns:
+        m = re.search(p, q)
+        if not m:
+            continue
+
+        row_entity = m.group(1).strip()
+        column_field = m.group(2).strip()
+
+        if row_entity and column_field:
+            return {
+                "wants_table": True,
+                "row_entity": row_entity,
+                "column_field": column_field,
+                "expected_chunk_type": "table_row",
+                "answer_style": "direct",
+            }
+
+    return {}
+
+def analyze_query_with_llm(query: str, model_name: str = "qwen2.5:7b-instruct") -> dict:
+    prompt = f"""
+你是一个通用 RAG 查询理解器。你的任务不是回答问题，而是把用户问题解析成 JSON。
+
+只输出 JSON，不要解释，不要 Markdown，不要代码块。
+
+你需要判断：
+1. 用户是否在问普通文本内容；
+2. 用户是否在问表格中的某一行对象、某个字段/列；
+3. 如果是表格问题，请抽取：
+   - row_entity：用户想查的行对象、项目、实体、指标、名称
+   - column_field：用户想查的字段、列名、属性、说明项
+4. 不确定就填 null，不要编造。
+
+输出 JSON schema：
+{{
+  "rewritten_query": "改写后的检索问题",
+  "retrieval_queries": ["检索词1", "检索词2"],
+  "query_type": "factual|table_lookup|compare|process|architecture|relation|troubleshooting",
+  "retrieval_mode": "keyword|semantic|hybrid",
+  "target_domains": [],
+  "semantic_intent": {{
+    "wants_table": false,
+    "row_entity": null,
+    "column_field": null,
+    "expected_chunk_type": null,
+    "answer_style": "direct"
+  }}
+}}
+
+示例1：
+用户问题：苹果公司的注册地址是什么
+输出：
+{{
+  "rewritten_query": "苹果公司 注册地址",
+  "retrieval_queries": ["苹果公司 注册地址", "注册地址"],
+  "query_type": "factual",
+  "retrieval_mode": "hybrid",
+  "target_domains": [],
+  "semantic_intent": {{
+    "wants_table": true,
+    "row_entity": "苹果公司",
+    "column_field": "注册地址",
+    "expected_chunk_type": "table_row",
+    "answer_style": "direct"
+  }}
+}}
+
+示例2：
+用户问题：系统架构有哪些模块
+输出：
+{{
+  "rewritten_query": "系统架构 模块",
+  "retrieval_queries": ["系统架构 模块", "架构 组成"],
+  "query_type": "architecture",
+  "retrieval_mode": "hybrid",
+  "target_domains": [],
+  "semantic_intent": {{
+    "wants_table": false,
+    "row_entity": null,
+    "column_field": null,
+    "expected_chunk_type": null,
+    "answer_style": "summary"
+  }}
+}}
+
+用户问题：
+{query}
+""".strip()
+
+    try:
+        out = generate_with_ollama(
+            prompt=prompt,
+            model_name=model_name,
+            timeout=120,
+        )
+        text = (out.get("response") or "").strip()
+
+        text = text.replace("```json", "").replace("```", "").strip()
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+
+        data = json.loads(text)
+
+        if not isinstance(data, dict):
+            return {}
+
+        semantic_intent = data.get("semantic_intent")
+        if not isinstance(semantic_intent, dict):
+            semantic_intent = {}
+
+        # LLM 没识别出来时，用规则兜底
+        rule_intent = infer_table_intent_rule(query)
+
+        if rule_intent and not semantic_intent.get("wants_table"):
+            semantic_intent = rule_intent
+            data["semantic_intent"] = semantic_intent
+            data["query_type"] = "table_lookup"
+            data["retrieval_mode"] = "hybrid"
+
+            row_entity = rule_intent.get("row_entity")
+            column_field = rule_intent.get("column_field")
+            data["rewritten_query"] = f"{row_entity} {column_field}".strip()
+            data["retrieval_queries"] = _unique_keep_order([
+                f"{row_entity} {column_field}",
+                str(row_entity or ""),
+                str(column_field or ""),
+            ])
+
+        return data
+
+    except Exception:
+        rule_intent = infer_table_intent_rule(query)
+        if rule_intent:
+            row_entity = rule_intent.get("row_entity")
+            column_field = rule_intent.get("column_field")
+            return {
+                "rewritten_query": f"{row_entity} {column_field}".strip(),
+                "retrieval_queries": _unique_keep_order([
+                    f"{row_entity} {column_field}",
+                    str(row_entity or ""),
+                    str(column_field or ""),
+                ]),
+                "query_type": "table_lookup",
+                "retrieval_mode": "hybrid",
+                "target_domains": [],
+                "semantic_intent": rule_intent,
+            }
+
+        return {}
+
 
 # =========================
 # 主入口（M4.8.7 + M4.8.12）
 # =========================
-def analyze_query(query: str) -> QueryUnderstandingResult:
+def analyze_query(
+    query: str,
+    model_name: str = "qwen2.5:7b-instruct",
+    use_llm: bool = True,
+) -> QueryUnderstandingResult:
     original_query = (query or "").strip()
+
+    llm_data = analyze_query_with_llm(original_query, model_name=model_name) if use_llm else {}
+
+    if llm_data:
+        rewritten_query = str(llm_data.get("rewritten_query") or original_query).strip()
+        query_type = str(llm_data.get("query_type") or "factual").strip()
+        retrieval_mode = str(llm_data.get("retrieval_mode") or "hybrid").strip()
+
+        target_domains = llm_data.get("target_domains") or []
+        if not isinstance(target_domains, list):
+            target_domains = []
+
+        retrieval_queries = llm_data.get("retrieval_queries") or []
+        if not isinstance(retrieval_queries, list):
+            retrieval_queries = []
+
+        retrieval_queries = _unique_keep_order(
+            [str(x).strip() for x in retrieval_queries if str(x).strip()]
+        )
+
+        semantic_intent = llm_data.get("semantic_intent") or {}
+        if not isinstance(semantic_intent, dict):
+            semantic_intent = {}
+
+        if not retrieval_queries:
+            row_entity = semantic_intent.get("row_entity")
+            column_field = semantic_intent.get("column_field")
+
+            if semantic_intent.get("wants_table") and row_entity and column_field:
+                retrieval_queries = _unique_keep_order([
+                    f"{row_entity} {column_field}",
+                    str(row_entity),
+                    str(column_field),
+                ])
+            else:
+                retrieval_queries = [rewritten_query]
+
+        constraints = extract_grounding_constraints(original_query)
+
+        return QueryUnderstandingResult(
+            original_query=original_query,
+            rewritten_query=rewritten_query,
+            retrieval_queries=retrieval_queries,
+            query_type=query_type,
+            target_domains=target_domains,
+            retrieval_mode=retrieval_mode,
+            routing_reason=(
+                f"llm_understanding model={model_name}, "
+                f"type={query_type}, intent={semantic_intent}"
+            ),
+            filename=constraints.get("filename"),
+            doc_role=constraints.get("doc_role"),
+            section_title=constraints.get("section_title"),
+            section_date=constraints.get("section_date"),
+            semantic_intent=semantic_intent,
+            understanding_model=model_name,
+        )
+
     rewritten_query = rewrite_query(original_query)
     query_type = detect_query_type(original_query)
     target_domains = detect_domains(rewritten_query or original_query)
@@ -340,7 +617,19 @@ def analyze_query(query: str) -> QueryUnderstandingResult:
         query_type=query_type,
         target_domains=target_domains,
     )
-    
+
+    rule_intent = infer_table_intent_rule(original_query)
+    if rule_intent:
+        query_type = "table_lookup"
+        retrieval_mode = "hybrid"
+        row_entity = rule_intent.get("row_entity")
+        column_field = rule_intent.get("column_field")
+        retrieval_queries = _unique_keep_order([
+            f"{row_entity} {column_field}",
+            str(row_entity or ""),
+            str(column_field or ""),
+        ])
+
     constraints = extract_grounding_constraints(original_query)
 
     return QueryUnderstandingResult(
@@ -350,9 +639,14 @@ def analyze_query(query: str) -> QueryUnderstandingResult:
         query_type=query_type,
         target_domains=target_domains,
         retrieval_mode=retrieval_mode,
-        routing_reason=f"type={query_type}, domains={target_domains}, constraints={constraints}",
+        routing_reason=(
+            f"rule_fallback type={query_type}, "
+            f"domains={target_domains}, constraints={constraints}, intent={rule_intent}"
+        ),
         filename=constraints.get("filename"),
         doc_role=constraints.get("doc_role"),
         section_title=constraints.get("section_title"),
         section_date=constraints.get("section_date"),
+        semantic_intent=rule_intent or {},
+        understanding_model="rule_fallback",
     )
